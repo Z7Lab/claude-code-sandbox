@@ -1,0 +1,31 @@
+# Cache directories (contains auth credentials and package caches)
+cache/
+
+# Claude Code settings (auto-created when running Claude in this directory)
+.claude/
+
+# Development workspace (see README.md for workflow usage)
+tmp/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Editor backup files
+*.bak
+*.tmp
+
+# Docker
+.dockerignore
