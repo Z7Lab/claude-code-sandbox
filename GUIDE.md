@@ -689,7 +689,11 @@ The `run-claude-sandboxed.sh` script supports various flags for customization:
 
 ### Updating Claude Code
 
-The script automatically checks for updates from Anthropic's official npm registry on startup and prompts you to rebuild if needed. This ensures you always have access to the latest official Claude Code release. For manual control:
+The script automatically checks for updates from Anthropic's official npm registry on startup and prompts you to rebuild if needed. This ensures you always have access to the latest official Claude Code release.
+
+**Optional Backup Protection:** Before any update, you'll be prompted to backup your cache directory (authentication, conversation history, personal agents) to a timestamped folder. While your data is excluded from Docker builds via `.dockerignore` and should be safe, backups provide extra protection.
+
+For manual control:
 
 **Check for updates:**
 
@@ -730,6 +734,40 @@ make clean
 ```bash
 ./run-claude-sandboxed.sh --skip-update-check
 ```
+
+**Manual backup (before updates or anytime):**
+
+```bash
+cd ~/devtools/claude-code-sandbox
+
+# Create timestamped backup
+cp -r cache cache.backup-$(date +%Y%m%d-%H%M%S)
+
+# Verify backup was created
+ls -d cache.backup-*
+```
+
+**Restore from backup (if you created one):**
+
+If an update causes problems and you created a backup, you can restore it:
+
+```bash
+cd ~/devtools/claude-code-sandbox
+
+# Find your backup (timestamped)
+ls -d cache.backup-*
+
+# Restore from backup
+rm -rf cache
+mv cache.backup-YYYYMMDD-HHMMSS cache  # Replace with actual timestamp
+```
+
+If created, backups include:
+
+- Authentication credentials
+- Conversation history
+- Personal agents and slash commands
+- Command history and preferences
 
 **See all available make commands:**
 

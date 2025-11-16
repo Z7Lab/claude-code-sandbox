@@ -1,5 +1,6 @@
 # Cache directories (contains auth credentials and package caches)
 cache/
+cache.backup-*/
 
 # Claude Code settings (auto-created when running Claude in this directory)
 .claude/
@@ -26,6 +27,3 @@ Thumbs.db
 # Editor backup files
 *.bak
 *.tmp
-
-# Docker
-.dockerignore

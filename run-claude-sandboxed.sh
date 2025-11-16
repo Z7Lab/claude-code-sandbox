@@ -200,13 +200,13 @@ GIT_EMAIL=$(git config --global user.email 2>/dev/null || echo "claude@local")
 # Check if container exists (running or stopped)
 if docker ps -a --format '{{.Names}}' | grep -q "^claude-sandboxed-session$"; then
     IS_RUNNING=$(docker ps --format '{{.Names}}' | grep -q "^claude-sandboxed-session$" && echo "yes" || echo "no")
-    
+
     if [ "$IS_RUNNING" = "yes" ]; then
         echo "⚠️  WARNING: Claude Code is already running in another terminal!"
     else
         echo "⚠️  WARNING: A stopped Claude Code container exists"
     fi
-    
+
     echo ""
     read -p "Remove it and continue? [y/N]: " -n 1 -r
     echo ""
@@ -285,6 +285,55 @@ if [ "$SKIP_UPDATE_CHECK" = false ]; then
         echo ""
 
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            # Ask about backup before update
+            if [ -d "$CACHE_DIR/claude-config/.claude" ]; then
+                echo "================================================================"
+                echo "💾 BACKUP YOUR DATA?"
+                echo "================================================================"
+                echo ""
+                echo "The Docker image rebuild should NOT affect your cache directory."
+                echo "Your data is excluded from the build (see .dockerignore)."
+                echo ""
+                echo "However, as a safety precaution, you can backup:"
+                echo "  • Authentication credentials"
+                echo "  • Personal agents and slash commands"
+                echo "  • Conversation history"
+                echo "  • Command history and preferences"
+                echo ""
+                read -p "Create backup before update? [Y/n]: " -n 1 -r BACKUP_CHOICE
+                echo ""
+                echo ""
+
+                if [[ ! $BACKUP_CHOICE =~ ^[Nn]$ ]]; then
+                    BACKUP_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                    BACKUP_DIR="$CACHE_DIR.backup-$BACKUP_TIMESTAMP"
+
+                    echo "Creating backup..."
+                    echo "Location: $BACKUP_DIR"
+                    echo ""
+
+                    if cp -r "$CACHE_DIR" "$BACKUP_DIR"; then
+                        echo "✅ Backup created successfully!"
+                        echo ""
+                        echo "💡 To restore if needed:"
+                        echo "   rm -rf $CACHE_DIR"
+                        echo "   mv $BACKUP_DIR $CACHE_DIR"
+                        echo ""
+                    else
+                        echo "❌ Backup failed!"
+                        echo ""
+                        read -p "Continue update anyway? [y/N]: " -n 1 -r CONTINUE_ANYWAY
+                        echo ""
+                        echo ""
+                        if [[ ! $CONTINUE_ANYWAY =~ ^[Yy]$ ]]; then
+                            echo "Update cancelled."
+                            exit 0
+                        fi
+                    fi
+                fi
+            fi
+
+            echo "================================================================"
             echo "Rebuilding Docker image with latest Claude Code..."
             echo "This may take 2-5 minutes..."
             echo ""
@@ -293,6 +342,13 @@ if [ "$SKIP_UPDATE_CHECK" = false ]; then
                 echo ""
                 echo "✅ Update complete!"
                 echo ""
+                if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+                    echo "Your data backup is preserved at:"
+                    echo "  $BACKUP_DIR"
+                    echo ""
+                    echo "You can safely delete it later if everything works correctly."
+                    echo ""
+                fi
                 # Update the installed version variable for display later
                 INSTALLED_VERSION="$LATEST_VERSION"
                 VERSION_CHECK_STATUS="up-to-date"
@@ -600,7 +656,7 @@ if [ "$ENABLE_MONITORING" = true ]; then
     # Detect if running in tmux
     if [ -n "$TMUX" ]; then
         echo "💡 TIP: You're in tmux! Open a split pane to watch stats:"
-        echo "   Ctrl+b then %  (or Ctrl+b then \")  - split pane"
+        echo '   Ctrl+b then %  (or Ctrl+b then ")  - split pane'
         echo "   tail -f $STATS_LOG"
         echo ""
     else

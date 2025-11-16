@@ -1,0 +1,11 @@
+# Exclude cache directory from Docker build context
+# This prevents any potential issues with user data during image rebuilds
+cache/
+cache.backup-*/
+
+# Exclude other unnecessary files from build context
+.git/
+.gitignore
+
+# Exclude project context directory (screenshots, reference docs, etc)
+tmp/

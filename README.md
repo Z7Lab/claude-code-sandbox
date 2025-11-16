@@ -345,6 +345,14 @@ The sandbox **automatically checks for updates** when you start it using multipl
 Rebuild with latest version now? [Y/n]:
 ```
 
+**You'll be prompted to backup before updates.** While the Docker rebuild shouldn't affect your cache (excluded via `.dockerignore`), you can create a timestamped safety backup:
+
+```
+~/devtools/claude-code-sandbox/cache.backup-20251116-143000/
+```
+
+This backs up your authentication, conversation history, and personal agents.
+
 If you skip the update, the version status is shown at startup:
 
 ```
