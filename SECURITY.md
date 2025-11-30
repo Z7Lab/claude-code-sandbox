@@ -353,11 +353,50 @@ Node.js, npm, pip                              ✅ Isolated versions
 - Cache persists across sessions but isolated from host
 - Cleared with `--fresh` flag if needed
 
-#### 3. Network Isolation (Optional)
+#### 3. Network Isolation
 
-- Can restrict network access
-- Can limit to specific domains
-- Prevents exfiltration of data
+**Default behavior (secure):**
+
+- Container cannot access host machine's localhost services
+- Services on your host (databases, APIs on localhost:8080, etc.) are unreachable
+- Prevents compromised code from connecting to local services
+
+**Optional: Host network access**
+
+For development scenarios requiring access to host services:
+
+```bash
+./run-claude-sandboxed.sh --allow-host-services ~/myproject
+```
+
+This adds `--add-host=host.docker.internal:host-gateway`, allowing the container to reach host services via `host.docker.internal`. Use only when needed—it weakens isolation.
+
+**Important:** This flag opens access to **all ports** on your host, not just the specific port you need. Docker's `--add-host` creates a DNS entry only—it does not support per-port filtering.
+
+**Advanced: Restricting to specific ports**
+
+If you need to limit which host ports the container can access, you have several options:
+
+| Method                    | Complexity | Enforcement Level |
+| ------------------------- | ---------- | ----------------- |
+| **iptables rules**        | Medium     | Kernel-level      |
+| **Custom Docker network** | High       | Network-level     |
+| **Proxy container**       | Medium     | Application-level |
+
+_iptables example (run on host before starting container):_
+
+```bash
+# Allow only PostgreSQL (5432) from Docker containers
+iptables -I DOCKER-USER -p tcp --dport 5432 -j ACCEPT
+iptables -I DOCKER-USER -p tcp -d 172.17.0.1 -j DROP
+```
+
+> **Note:** iptables rules require root access on the host and persist until cleared. This is an advanced configuration—most users should simply avoid `--allow-host-services` when working with untrusted code.
+
+**Additional network restrictions:**
+
+- **No network at all:** `--network=none` (requires editing the script)
+- **Specific domains only:** Requires custom Docker network with DNS filtering
 
 #### 4. Process Isolation
 
@@ -439,19 +478,31 @@ Docker sandbox: ✅ Installs in container only
 Without sandbox: ❌ Global npm packages affected
 ```
 
+**Scenario 5: Access to Local Services**
+
+```
+Claude tries: curl http://localhost:5432 (local database)
+Docker sandbox (default): ✅ Connection refused - localhost is isolated
+Docker sandbox (--allow-host-services): ⚠️ Can connect via host.docker.internal
+Without sandbox: ❌ Full access to all local services
+```
+
+**Best practice:** Only use `--allow-host-services` when actively developing against local services, and disable it when working with untrusted code.
+
 ---
 
 ## What Docker Sandboxing Provides
 
-| Security Feature      | How Docker Protects                                    |
-| --------------------- | ------------------------------------------------------ |
-| **File System**       | Complete isolation - only project directory accessible |
-| **System Access**     | No access to host system files, SSH keys, configs      |
-| **Package Install**   | Contained in container, doesn't affect host            |
-| **Process Isolation** | Container processes separate from host                 |
-| **Network Control**   | Optional restrictions on outbound connections          |
-| **Easy Recovery**     | Delete container = complete cleanup                    |
-| **Reproducible**      | Same isolated environment every time                   |
+| Security Feature      | How Docker Protects                                              |
+| --------------------- | ---------------------------------------------------------------- |
+| **File System**       | Complete isolation - only project directory accessible           |
+| **System Access**     | No access to host system files, SSH keys, configs                |
+| **Package Install**   | Contained in container, doesn't affect host                      |
+| **Process Isolation** | Container processes separate from host                           |
+| **Host Network**      | Cannot reach localhost services (unless `--allow-host-services`) |
+| **Network Control**   | Optional restrictions on outbound connections                    |
+| **Easy Recovery**     | Delete container = complete cleanup                              |
+| **Reproducible**      | Same isolated environment every time                             |
 
 **Combined with Claude Code's features:**
 

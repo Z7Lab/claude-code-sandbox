@@ -48,6 +48,7 @@ SKIP_RESOURCE_PROMPTS=false
 FRESH_START=false
 ENABLE_MONITORING=false
 SKIP_UPDATE_CHECK=false
+ALLOW_HOST_SERVICES=false  # Allow container to reach host localhost services
 PORT="3377"  # Default authentication port
 
 while [[ $# -gt 0 ]]; do
@@ -107,6 +108,10 @@ while [[ $# -gt 0 ]]; do
         --port)
             PORT="$2"
             shift 2
+            ;;
+        --allow-host-services)
+            ALLOW_HOST_SERVICES=true
+            shift
             ;;
         *)
             PROJECT_DIR="$1"
@@ -714,6 +719,12 @@ if [ "$ENABLE_MONITORING" = true ]; then
     MONITOR_PID=$!
 fi
 
+# Build host access flag if enabled
+HOST_ACCESS_FLAG=""
+if [ "$ALLOW_HOST_SERVICES" = true ]; then
+    HOST_ACCESS_FLAG="--add-host=host.docker.internal:host-gateway"
+fi
+
 # Run Docker with host user UID/GID to prevent permission issues
 # Files created by Claude will be owned by you, not root
 # Each project gets a unique container path for isolated permissions/sessions
@@ -722,6 +733,7 @@ docker run -it --rm \
     $RESOURCE_FLAGS \
     --user "$(id -u):$(id -g)" \
     -e HOME=/home/claude \
+    $HOST_ACCESS_FLAG \
     -p "$PORT:3000" \
     -v "$PROJECT_DIR:$CONTAINER_PATH:rw" \
     -v "$CACHE_DIR/pip:/cache/pip:rw" \
