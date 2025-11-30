@@ -693,6 +693,24 @@ The script automatically checks for updates from Anthropic's official npm regist
 
 **Optional Backup Protection:** Before any update, you'll be prompted to backup your cache directory (authentication, conversation history, personal agents) to a timestamped folder. While your data is excluded from Docker builds via `.dockerignore` and should be safe, backups provide extra protection.
 
+#### Update Released During Active Session
+
+If an update is released while you're in an active Claude Code session, the sandboxed instance may detect it and display:
+
+```
+Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+```
+
+This is expected behavior in the sandbox environment. Claude Code's built-in auto-update mechanism tries to run `npm i -g @anthropic-ai/claude-code`, but this cannot persist in the ephemeral Docker container.
+
+**To update:**
+
+1. Exit your current session (Ctrl+C)
+2. Restart the script - it will detect the new version and prompt you to rebuild
+3. The update check happens automatically on each startup
+
+You don't need to run `claude doctor` or any npm commands manually - the sandbox handles this for you at startup.
+
 For manual control:
 
 **Check for updates:**

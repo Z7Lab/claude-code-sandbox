@@ -391,6 +391,16 @@ Claude Code normally auto-updates via `npm i -g @anthropic-ai/claude-code`, but 
 - Updates to `/usr/local/lib/node_modules` inside the container are lost on restart
 - The sandbox uses **Docker best practices**: dependencies belong in the image, not the container
 
+**What if an update is released during my session?**
+
+If Claude Code detects a new version while you're working, you may see:
+
+```
+Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+```
+
+This is expected in the sandbox. Simply exit your session (Ctrl+C), and the script will detect the new version and prompt you to update when you restart.
+
 To skip the automatic update check (for CI/scripts), use:
 
 ```bash
