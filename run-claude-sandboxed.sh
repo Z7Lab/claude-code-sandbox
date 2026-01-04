@@ -49,7 +49,73 @@ FRESH_START=false
 ENABLE_MONITORING=false
 SKIP_UPDATE_CHECK=false
 ALLOW_HOST_SERVICES=false  # Allow container to reach host localhost services
-PORT="3377"  # Default authentication port
+PORT=""  # Empty = auto-select
+PORT_AUTO=true
+INSTANCE_NAME=""  # Optional: user-provided instance name
+
+# Function to find an available port
+find_available_port() {
+    local start_port="${1:-3377}"
+    local max_port=$((start_port + 100))
+    local port=$start_port
+
+    while [ $port -lt $max_port ]; do
+        # Check if port is in use (by any process, not just Docker)
+        if ! ss -tuln 2>/dev/null | grep -q ":$port " && \
+           ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+            echo $port
+            return 0
+        fi
+        port=$((port + 1))
+    done
+
+    # Fallback: return the start port and let Docker fail with clear message
+    echo $start_port
+    return 1
+}
+
+# Function to generate a unique container name
+generate_container_name() {
+    local project_name="$1"
+    local port="$2"
+    local instance_name="$3"
+
+    # Clean project name for Docker (alphanumeric, hyphens, underscores only)
+    local clean_project=$(basename "$project_name" | tr -cd '[:alnum:]-_' | cut -c1-20)
+
+    if [ -n "$instance_name" ]; then
+        # User-provided name
+        echo "claude-sandbox-${instance_name}"
+    else
+        # Auto-generated: project-port
+        echo "claude-sandbox-${clean_project}-${port}"
+    fi
+}
+
+# Function to list running sandbox instances
+list_instances() {
+    echo "================================================================"
+    echo "🐳 Running Claude Code Sandbox Instances"
+    echo "================================================================"
+    echo ""
+
+    local instances=$(docker ps --filter "name=claude-sandbox-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null)
+
+    if [ -z "$instances" ] || [ "$(echo "$instances" | wc -l)" -le 1 ]; then
+        echo "No running instances found."
+    else
+        echo "$instances"
+    fi
+    echo ""
+}
+
+# Check for --list flag early (before other argument parsing)
+for arg in "$@"; do
+    if [[ "$arg" == "--list" ]] || [[ "$arg" == "-l" ]]; then
+        list_instances
+        exit 0
+    fi
+done
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -107,11 +173,21 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port)
             PORT="$2"
+            PORT_AUTO=false
+            shift 2
+            ;;
+        --name)
+            INSTANCE_NAME="$2"
             shift 2
             ;;
         --allow-host-services)
             ALLOW_HOST_SERVICES=true
             shift
+            ;;
+        --list|-l)
+            # Already handled above, but include for completeness
+            list_instances
+            exit 0
             ;;
         *)
             PROJECT_DIR="$1"
@@ -202,27 +278,44 @@ fi
 GIT_NAME=$(git config --global user.name 2>/dev/null || echo "Claude User")
 GIT_EMAIL=$(git config --global user.email 2>/dev/null || echo "claude@local")
 
-# Check if container exists (running or stopped)
-if docker ps -a --format '{{.Names}}' | grep -q "^claude-sandboxed-session$"; then
-    IS_RUNNING=$(docker ps --format '{{.Names}}' | grep -q "^claude-sandboxed-session$" && echo "yes" || echo "no")
+# Auto-select port if not specified
+if [ "$PORT_AUTO" = true ] || [ -z "$PORT" ]; then
+    PORT=$(find_available_port 3377)
+    if [ $? -ne 0 ]; then
+        echo "⚠️  Warning: Could not verify port availability. Using port $PORT"
+    fi
+fi
+
+# Generate unique container name
+CONTAINER_NAME=$(generate_container_name "$PROJECT_DIR" "$PORT" "$INSTANCE_NAME")
+
+# Check if this specific container name already exists
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    IS_RUNNING=$(docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" && echo "yes" || echo "no")
 
     if [ "$IS_RUNNING" = "yes" ]; then
-        echo "⚠️  WARNING: Claude Code is already running in another terminal!"
+        echo "⚠️  WARNING: Instance '$CONTAINER_NAME' is already running!"
+        echo ""
+        echo "Options:"
+        echo "  1) Use a different port: $0 --port <number>"
+        echo "  2) Use a custom name: $0 --name <name>"
+        echo "  3) List running instances: $0 --list"
     else
-        echo "⚠️  WARNING: A stopped Claude Code container exists"
+        echo "⚠️  WARNING: A stopped container '$CONTAINER_NAME' exists"
     fi
 
     echo ""
-    read -p "Remove it and continue? [y/N]: " -n 1 -r
+    read -p "Remove existing container and continue? [y/N]: " -n 1 -r
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Removing container..."
-        docker rm -f claude-sandboxed-session 2>/dev/null
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null
         echo "✅ Container removed"
         echo ""
     else
-        echo "Cancelled. Remove the container manually with:"
-        echo "  docker rm -f claude-sandboxed-session"
+        echo "Cancelled."
+        echo ""
+        echo "Tip: Run '$0 --list' to see all running instances"
         exit 1
     fi
 fi
@@ -408,6 +501,24 @@ if [ "$IS_FIRST_RUN" = true ]; then
     echo "================================================================"
     echo ""
 fi
+
+# Show instance information (important for multi-instance use)
+echo "🐳 Instance Information:"
+echo "   Container name: $CONTAINER_NAME"
+echo "   Auth port:      $PORT"
+if [ "$PORT_AUTO" = true ]; then
+    echo "   (Port auto-selected. Use --port <number> to specify)"
+fi
+echo ""
+
+# Count other running instances
+RUNNING_COUNT=$(docker ps --filter "name=claude-sandbox-" --format "{{.Names}}" 2>/dev/null | wc -l)
+if [ "$RUNNING_COUNT" -gt 0 ]; then
+    echo "   📊 Other running instances: $RUNNING_COUNT"
+    echo "   (Run '$0 --list' to see all)"
+    echo ""
+fi
+
 echo "📁 Your project directory:"
 echo "   Host: $PROJECT_DIR"
 echo "   Container: $CONTAINER_PATH"
@@ -417,9 +528,6 @@ echo "   → Each project has isolated permissions and session history"
 echo ""
 echo "🔧 Claude Code Sandbox tool location:"
 echo "   $SANDBOX_DIR"
-echo ""
-echo "🔗 Authentication port: $PORT"
-echo "   (Change with: run-claude-sandboxed.sh --port <number>)"
 echo ""
 
 # Resource limits configuration (interactive or from flags/saved settings)
@@ -594,7 +702,7 @@ fi
 
 if [ "$IS_FIRST_RUN" = true ]; then
     echo "================================================================"
-    echo "🔐 FIRST RUN - AUTHENTICATION REQUIRED"
+    echo "🔑 FIRST RUN - AUTHENTICATION REQUIRED"
     echo "================================================================"
     echo ""
     echo "This sandbox runs the official Claude Code inside Docker."
@@ -697,21 +805,21 @@ if [ "$ENABLE_MONITORING" = true ]; then
     {
         # Wait for container to be running
         for i in {1..30}; do
-            if docker ps --format '{{.Names}}' | grep -q "^claude-sandboxed-session$"; then
+            if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
                 break
             fi
             sleep 0.5
         done
 
         # Start monitoring
-        if docker ps --format '{{.Names}}' | grep -q "^claude-sandboxed-session$"; then
+        if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
             echo "==================================================================" > "$STATS_LOG"
             echo "📊 Resource Monitoring - Started $(date)" >> "$STATS_LOG"
             echo "==================================================================" >> "$STATS_LOG"
             echo "" >> "$STATS_LOG"
 
             # Run docker stats with formatting
-            docker stats claude-sandboxed-session \
+            docker stats "$CONTAINER_NAME" \
                 --format "table {{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}" \
                 >> "$STATS_LOG" 2>&1
         fi
@@ -729,7 +837,7 @@ fi
 # Files created by Claude will be owned by you, not root
 # Each project gets a unique container path for isolated permissions/sessions
 docker run -it --rm \
-    --name claude-sandboxed-session \
+    --name "$CONTAINER_NAME" \
     $RESOURCE_FLAGS \
     --user "$(id -u):$(id -g)" \
     -e HOME=/home/claude \
@@ -768,14 +876,14 @@ if [ $DOCKER_EXIT_CODE -ne 0 ] && [ $DOCKER_EXIT_CODE -ne 130 ]; then
     echo ""
 
     # Check for port conflict first (most common issue)
-    if docker logs claude-sandboxed-session 2>&1 | grep -q "address already in use\|bind.*failed"; then
+    if docker logs "$CONTAINER_NAME" 2>&1 | grep -q "address already in use\|bind.*failed"; then
         echo "💡 PORT CONFLICT DETECTED"
         echo ""
         echo "Port $PORT is already in use on your system."
         echo ""
         echo "Solutions:"
-        echo "   1) Stop the service using port $PORT"
-        echo "   2) Run with a different port: $0 --port 3378"
+        echo "   1) The script should auto-select ports, but this one was taken"
+        echo "   2) Run with a different port: $0 --port <number>"
         echo "   3) Find what's using the port: lsof -i :$PORT"
         echo ""
     # Check for GPU error (common issue)
@@ -825,7 +933,7 @@ if [ $DOCKER_EXIT_CODE -ne 0 ] && [ $DOCKER_EXIT_CODE -ne 130 ]; then
 fi
 
 echo "Claude Code session ended."
-echo "Docker container removed."
+echo "Docker container '$CONTAINER_NAME' removed."
 echo ""
 
 # Show monitoring summary if it was enabled
