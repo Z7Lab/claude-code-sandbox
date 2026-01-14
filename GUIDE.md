@@ -58,14 +58,19 @@ Docker container removed.
 **Force stop (if terminal is frozen):**
 
 ```bash
-# From another terminal
-docker stop claude-sandboxed-session
+# From another terminal - find your container name first
+run-claude-sandboxed.sh --list
+
+# Stop it using the container name shown
+docker stop claude-sandbox-myproject-3377
 ```
 
 **Check if still running:**
 
 ```bash
 docker ps
+# Or use the built-in list command
+run-claude-sandboxed.sh --list
 ```
 
 ### Known Limitation: Drag-and-Drop Images
@@ -411,28 +416,37 @@ Example: `~/myproject/.claude/agents/my-agent.md`
 
 **Error:** `address already in use` or `failed to bind host port`
 
-The default authentication port (3377) is already in use by another service.
+The sandbox automatically selects an available port from range 3377-3476. This error is rare but can occur if all 100 ports are in use.
 
 **Solutions:**
 
-**Option 1: Use a different port**
+**Option 1: Specify a port outside the auto-select range**
 
 ```bash
-./run-claude-sandboxed.sh --port 3378
+./run-claude-sandboxed.sh --port 4000
 ```
 
-**Option 2: Find and stop the conflicting service**
+**Option 2: Find and stop conflicting services**
 
 ```bash
-# Find what's using the port
-lsof -i :3377
+# Find what's using ports in the range
+lsof -i :3377-3476
 
-# Or use netstat
+# Or check a specific port
 netstat -tulpn | grep 3377
 ```
 
-**Option 3: Change default port permanently**
-Edit `run-claude-sandboxed.sh` and change `PORT="3377"` to your preferred port.
+**Option 3: List running sandbox instances**
+
+If you have many sandbox instances running, some can be stopped:
+
+```bash
+# List all running sandbox instances
+./run-claude-sandboxed.sh --list
+
+# Stop one you no longer need
+docker stop claude-sandbox-oldproject-3378
+```
 
 ### Docker Access
 
@@ -558,8 +572,9 @@ If you prefer manual control or need to clean up a stuck container:
 # Navigate to sandbox directory
 cd ~/devtools/claude-code-sandbox
 
-# Stop any running container
-docker stop claude-sandboxed-session 2>/dev/null
+# List and stop any running containers
+./run-claude-sandboxed.sh --list
+docker stop claude-sandbox-myproject-3377 2>/dev/null  # Use actual name from list
 
 # Remove all cached data
 rm -rf cache/*
@@ -645,11 +660,23 @@ rm -f ~/devtools/claude-code-sandbox/cache/claude-config/.claude/history.jsonl
 
 The `run-claude-sandboxed.sh` script supports various flags for customization:
 
+**Multi-Instance Management:**
+
+```bash
+# List all running sandbox instances
+./run-claude-sandboxed.sh --list
+./run-claude-sandboxed.sh -l
+
+# Use a custom instance name
+./run-claude-sandboxed.sh --name my-feature-branch ~/myproject
+```
+
 **Port Configuration:**
 
 ```bash
-# Use custom authentication port (default: 3377)
-./run-claude-sandboxed.sh --port 3378
+# Port auto-selects from 3377-3476 by default
+# Manually specify a port (use if auto-selection fails)
+./run-claude-sandboxed.sh --port 4000
 ```
 
 **Resource Limits:**

@@ -323,12 +323,35 @@ There are two locations:
 
 > **📖 See:** [GUIDE.md - Custom Agents](GUIDE.md#custom-agents-and-slash-commands) for details on when to use each
 
-**Q: I get "port already in use" error, what do I do?**
+**Q: Can I run multiple sandbox instances at the same time?**
 
-The default authentication port (3377) is being used by another service. Run with a different port:
+Yes! The sandbox supports multiple concurrent instances with automatic port selection and unique container naming:
 
 ```bash
-run-claude-sandboxed.sh --port 3378
+# Terminal 1: Start first instance
+cd ~/project-a
+run-claude-sandboxed.sh
+
+# Terminal 2: Start second instance (auto-selects next available port)
+cd ~/project-b
+run-claude-sandboxed.sh
+
+# List all running instances
+run-claude-sandboxed.sh --list
+```
+
+Each instance gets a unique container name like `claude-sandbox-projectname-3377`. You can also specify custom names:
+
+```bash
+run-claude-sandboxed.sh --name my-custom-name ~/myproject
+```
+
+**Q: I get "port already in use" error, what do I do?**
+
+The sandbox automatically selects an available port from 3377-3476. If auto-selection fails (rare), specify a port outside that range:
+
+```bash
+run-claude-sandboxed.sh --port 4000
 ```
 
 > **📖 See:** [GUIDE.md - Port Conflicts](GUIDE.md#port-conflicts) for details
