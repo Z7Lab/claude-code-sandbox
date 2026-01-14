@@ -14,6 +14,7 @@
 4. [What Persists](#what-persists)
 5. [Troubleshooting](#troubleshooting)
 6. [Advanced Configuration](#advanced-configuration)
+   - [Host Network Access](#host-network-access)
 
 ---
 
@@ -685,7 +686,64 @@ The `run-claude-sandboxed.sh` script supports various flags for customization:
 
 # Reset everything (prompts for confirmation)
 ./run-claude-sandboxed.sh --fresh
+
+# Allow access to host machine services (see below)
+./run-claude-sandboxed.sh --allow-host-services
 ```
+
+### Host Network Access
+
+By default, the sandbox is isolated from your host machine's network services. Code running inside the container cannot connect to `localhost` services on your host (databases, API servers, etc.). This is a security feature.
+
+**When you need host access:**
+
+If your project needs to connect to services running on your host machine (e.g., a local PostgreSQL database, development API server, or other localhost services), use the `--allow-host-services` flag:
+
+```bash
+./run-claude-sandboxed.sh --allow-host-services ~/myproject
+```
+
+**How to connect:**
+
+Inside the container, use `host.docker.internal` instead of `localhost`:
+
+```bash
+# Database connection
+postgres://user:pass@host.docker.internal:5432/mydb
+
+# API requests
+curl http://host.docker.internal:8080/api/data
+
+# Environment variables
+DATABASE_HOST=host.docker.internal
+```
+
+**What this does:**
+
+Adds `--add-host=host.docker.internal:host-gateway` to the Docker run command, which creates a DNS entry mapping `host.docker.internal` to your host machine's IP address.
+
+**Security implications:**
+
+| Aspect                | Impact                                                                 |
+| --------------------- | ---------------------------------------------------------------------- |
+| **Network isolation** | Weakened - container can reach host services                           |
+| **Port access**       | **All ports** on your host become reachable, not just the one you need |
+| **Attack surface**    | Any service listening on your host becomes reachable                   |
+| **Data exfiltration** | Compromised code could connect to local services                       |
+
+> **Note:** Docker's `--add-host` flag creates a DNS entry but does not support per-port restrictions. Once enabled, all host ports are accessible. For advanced port restriction options using firewalls, see [SECURITY.md - Network Isolation](SECURITY.md#3-network-isolation).
+
+**When NOT to use:**
+
+- Working with untrusted code or dependencies
+- When maximum isolation is required
+- When you don't need to access host services
+
+**When to use:**
+
+- Local development with databases (PostgreSQL, MySQL, Redis)
+- Connecting to local API servers during development
+- Integration testing with host services
 
 ### Updating Claude Code
 

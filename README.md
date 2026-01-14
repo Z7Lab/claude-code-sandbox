@@ -333,6 +333,24 @@ run-claude-sandboxed.sh --port 3378
 
 > **📖 See:** [GUIDE.md - Port Conflicts](GUIDE.md#port-conflicts) for details
 
+**Q: My project needs to connect to services running on my host machine (localhost). How?**
+
+By default, the sandbox cannot access your host's localhost services (databases, APIs, etc.) for security. If you need this access, use the `--allow-host-services` flag:
+
+```bash
+run-claude-sandboxed.sh --allow-host-services ~/myproject
+```
+
+Inside the container, connect to `host.docker.internal` instead of `localhost`:
+
+```bash
+# Instead of: curl http://localhost:8080
+curl http://host.docker.internal:8080
+```
+
+> **⚠️ Security note:** This allows access to **any port** on your host. Only use when necessary.
+> **📖 See:** [GUIDE.md - Host Network Access](GUIDE.md#host-network-access) for details
+
 **Q: How do I update to the latest Claude Code version?**
 
 The sandbox **automatically checks for updates** when you start it using multiple methods (curl, wget, npm) with network timeout handling. If a new version is available, you'll be prompted to update:
