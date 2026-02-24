@@ -1,0 +1,69 @@
+# Extra Mounts - Claude Code Sandbox
+#
+# Mount additional host directories into the container alongside
+# the project directory. Useful for files that live outside the
+# project tree — downloads, datasets, logs, shared libraries, etc.
+#
+# Every entry here applies to all projects. For one-off mounts,
+# use the --mount flag instead (see GUIDE.md).
+#
+# To use: copy this file to mounts.conf and uncomment/edit entries.
+#   cp mounts.conf.example mounts.conf
+#
+# Format: /absolute/host/path|relative/path/in/project|mode
+#
+#   host-path     = absolute path on the host (~ is expanded)
+#   relative-path = where it appears inside the project in the container
+#   mode          = ro (read-only) or rw (read-write). Defaults to ro
+#
+# Changes take effect on next run. No rebuild needed.
+# Lines starting with # are comments. Blank lines are ignored.
+#
+# ── Common Mounts ────────────────────────────────────────────
+#
+# ~/Shared|shared|ro
+# ~/Downloads|tmp/downloads|ro
+#
+# ── Application Logs ────────────────────────────────────────
+# Mount log files from a service running on the host so Claude
+# can help analyze errors, performance issues, or patterns.
+#
+# /var/log/myapp|logs/host|ro
+# ~/.pm2/logs|logs/pm2|ro
+#
+# ── Datasets ────────────────────────────────────────────────
+# Large datasets stored on a separate drive or outside the
+# project tree. Avoids duplicating gigabytes of data.
+#
+# /mnt/data/training-images|data/training|ro
+# ~/datasets/clickstream-2026|data/raw|ro
+#
+# ── Shared Libraries / Components ───────────────────────────
+# A folder of reusable code, UI components, or utilities
+# shared across multiple projects.
+#
+# ~/dev/shared-ui-components|lib/shared-ui|ro
+# ~/dev/design-tokens|src/tokens|ro
+#
+# ── Reference Docs / Specs ─────────────────────────────────
+# API specs, architecture docs, or design documents stored
+# in a central location outside any single project.
+#
+# ~/Documents/api-specs|docs/specs|ro
+# ~/Documents/design-system|docs/design|ro
+#
+# ── Internal / Synced Docs ─────────────────────────────────
+# Gitignored internal docs synced across machines (e.g., via
+# Syncthing, Dropbox, or similar). Keeps private notes
+# available without committing them to version control.
+#
+# ~/internal-docs|docs/internal|ro
+#
+# ── Writable Output (read-write) ───────────────────────────
+# A writable directory for generated output, exports, or
+# scratch files that should persist outside the project.
+# Use rw instead of ro when the agent needs to write here.
+# Omitting the mode defaults to ro.
+#
+# ~/shared-output|output|rw
+# ~/exports|data/exports|rw

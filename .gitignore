@@ -2,6 +2,9 @@
 cache/
 cache.backup-*/
 
+# User-specific extra mounts config (mounts.conf.example is tracked)
+mounts.conf
+
 # Claude Code settings (auto-created when running Claude in this directory)
 .claude/
 

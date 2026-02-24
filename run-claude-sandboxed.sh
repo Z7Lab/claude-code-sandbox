@@ -6,6 +6,7 @@ SANDBOX_DIR="$SCRIPT_DIR"
 CACHE_DIR="$SANDBOX_DIR/cache"
 CONFIG_DIR="$CACHE_DIR/claude-config"
 RESOURCES_DIR="$CONFIG_DIR/resources"
+EXTRA_MOUNTS_CONF="$SANDBOX_DIR/mounts.conf"
 
 # Resource preset definitions
 declare -A PRESET_MEMORY=(
@@ -52,6 +53,7 @@ ALLOW_HOST_SERVICES=false  # Allow container to reach host localhost services
 PORT=""  # Empty = auto-select
 PORT_AUTO=true
 INSTANCE_NAME=""  # Optional: user-provided instance name
+CLI_MOUNTS=()  # Extra mounts from --mount flags
 
 # Function to find an available port
 find_available_port() {
@@ -184,6 +186,10 @@ while [[ $# -gt 0 ]]; do
             ALLOW_HOST_SERVICES=true
             shift
             ;;
+        --mount)
+            CLI_MOUNTS+=("$2")
+            shift 2
+            ;;
         --list|-l)
             # Already handled above, but include for completeness
             list_instances
@@ -252,6 +258,69 @@ fi
 # Create unique container path from host path to keep projects isolated
 # Transform /home/user/my-project -> /sandboxed_home-user-my-project
 CONTAINER_PATH="/sandboxed_$(echo "$PROJECT_DIR" | sed 's:^/::' | tr '/' '-' | tr ' ' '_' | tr -d "'\"")"
+
+# ── Extra Mounts Detection ───────────────────────────────────
+# Reads mounts.conf to find additional directories to mount into
+# the container. All entries apply to every project.
+EXTRA_MOUNT_FLAGS=""
+EXTRA_MOUNT_LINES=()
+
+if [ -f "$EXTRA_MOUNTS_CONF" ]; then
+    while IFS='|' read -r conf_hostpath conf_relpath conf_mode; do
+        # Skip comments and blank lines
+        [[ "$conf_hostpath" =~ ^#.*$ || -z "$conf_hostpath" ]] && continue
+
+        # Trim whitespace
+        conf_hostpath=$(echo "$conf_hostpath" | xargs)
+        conf_relpath=$(echo "$conf_relpath" | xargs)
+        conf_mode=$(echo "$conf_mode" | xargs)
+
+        # Expand ~ in host path
+        conf_hostpath="${conf_hostpath/#\~/$HOME}"
+
+        # Default mode to ro if not specified
+        conf_mode="${conf_mode:-ro}"
+
+        container_mount_path="$CONTAINER_PATH/$conf_relpath"
+
+        if [ ! -e "$conf_hostpath" ]; then
+            EXTRA_MOUNT_LINES+=("⚠️  $conf_hostpath does not exist (skipped)")
+        elif [ ! -d "$conf_hostpath" ]; then
+            EXTRA_MOUNT_LINES+=("⚠️  $conf_hostpath is not a directory (skipped)")
+        elif [ ! -r "$conf_hostpath" ]; then
+            EXTRA_MOUNT_LINES+=("⚠️  $conf_hostpath permission denied (skipped)")
+        else
+            EXTRA_MOUNT_FLAGS="$EXTRA_MOUNT_FLAGS -v $conf_hostpath:$container_mount_path:$conf_mode"
+            EXTRA_MOUNT_LINES+=("$conf_hostpath → $container_mount_path ($conf_mode)")
+        fi
+    done < "$EXTRA_MOUNTS_CONF"
+fi
+
+# Process --mount CLI flags (format: /host/path:relative/path[:mode])
+for cli_mount in "${CLI_MOUNTS[@]}"; do
+    cli_hostpath=$(echo "$cli_mount" | cut -d: -f1)
+    cli_relpath=$(echo "$cli_mount" | cut -d: -f2)
+    cli_mode=$(echo "$cli_mount" | cut -d: -f3)
+
+    # Expand ~ in host path
+    cli_hostpath="${cli_hostpath/#\~/$HOME}"
+
+    # Default mode to ro
+    cli_mode="${cli_mode:-ro}"
+
+    container_mount_path="$CONTAINER_PATH/$cli_relpath"
+
+    if [ ! -e "$cli_hostpath" ]; then
+        EXTRA_MOUNT_LINES+=("⚠️  $cli_hostpath does not exist (skipped)")
+    elif [ ! -d "$cli_hostpath" ]; then
+        EXTRA_MOUNT_LINES+=("⚠️  $cli_hostpath is not a directory (skipped)")
+    elif [ ! -r "$cli_hostpath" ]; then
+        EXTRA_MOUNT_LINES+=("⚠️  $cli_hostpath permission denied (skipped)")
+    else
+        EXTRA_MOUNT_FLAGS="$EXTRA_MOUNT_FLAGS -v $cli_hostpath:$container_mount_path:$cli_mode"
+        EXTRA_MOUNT_LINES+=("$cli_hostpath → $container_mount_path ($cli_mode)")
+    fi
+done
 
 # Resource config file for this project
 RESOURCE_CONF_NAME="$(echo "$CONTAINER_PATH" | sed 's/^\///')"
@@ -523,8 +592,20 @@ echo "📁 Your project directory:"
 echo "   Host: $PROJECT_DIR"
 echo "   Container: $CONTAINER_PATH"
 echo ""
-echo "   → Claude can ONLY access files in this directory"
+echo "   → Claude can ONLY access files in this directory (plus any extra mounts)"
 echo "   → Each project has isolated permissions and session history"
+
+echo ""
+if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+    echo "📂 Extra mounts:"
+    for line in "${EXTRA_MOUNT_LINES[@]}"; do
+        echo "   $line"
+    done
+elif [ -f "$EXTRA_MOUNTS_CONF" ]; then
+    echo "📂 Extra mounts: none for this project"
+else
+    echo "📂 Extra mounts: none (see mounts.conf.example to configure)"
+fi
 echo ""
 echo "🔧 Claude Code Sandbox tool location:"
 echo "   $SANDBOX_DIR"
@@ -735,6 +816,14 @@ if [ "$IS_FIRST_RUN" = true ]; then
     echo "   → Docker isolation protects your system"
     echo ""
     echo "================================================================"
+    if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+        echo ""
+        echo "📂 Extra mounts:"
+        for line in "${EXTRA_MOUNT_LINES[@]}"; do
+            echo "   $line"
+        done
+    fi
+    echo ""
     read -p "Press ENTER to start (or Ctrl+C to cancel)... "
     echo ""
 else
@@ -745,6 +834,13 @@ else
     echo ""
     echo "   NOT your host path:"
     echo "   ❌ $PROJECT_DIR/yourfile.py"
+    if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+        echo ""
+        echo "📂 Extra mounts:"
+        for line in "${EXTRA_MOUNT_LINES[@]}"; do
+            echo "   $line"
+        done
+    fi
     echo ""
     read -p "Press ENTER to start (or Ctrl+C to cancel)... "
     echo ""
@@ -844,6 +940,7 @@ docker run -it --rm \
     $HOST_ACCESS_FLAG \
     -p "$PORT:3000" \
     -v "$PROJECT_DIR:$CONTAINER_PATH:rw" \
+    $EXTRA_MOUNT_FLAGS \
     -v "$CACHE_DIR/pip:/cache/pip:rw" \
     -v "$CACHE_DIR/npm:/cache/npm:rw" \
     -v "$CONFIG_DIR:/home/claude:rw" \

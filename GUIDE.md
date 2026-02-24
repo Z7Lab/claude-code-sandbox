@@ -14,6 +14,7 @@
 4. [What Persists](#what-persists)
 5. [Troubleshooting](#troubleshooting)
 6. [Advanced Configuration](#advanced-configuration)
+   - [Extra Mounts](#extra-mounts)
    - [Host Network Access](#host-network-access)
 
 ---
@@ -717,6 +718,66 @@ The `run-claude-sandboxed.sh` script supports various flags for customization:
 # Allow access to host machine services (see below)
 ./run-claude-sandboxed.sh --allow-host-services
 ```
+
+### Extra Mounts
+
+By default, the sandbox only mounts your project directory into the container. Files outside the project tree (downloads, datasets, logs, shared libraries) are invisible. Symlinks pointing outside the project also break, since the target doesn't exist inside the container.
+
+**Extra mounts** let you mount additional host directories into the container alongside your project. Every entry in `mounts.conf` applies to all projects. For one-off mounts, use the `--mount` CLI flag instead.
+
+**Setup:** Create a `mounts.conf` file in the sandbox directory (next to `run-claude-sandboxed.sh`), or copy from the example:
+
+```bash
+cp mounts.conf.example mounts.conf
+```
+
+**Format:** `/host/path|relative/path/in/project|mode`
+
+```bash
+# Shared folder accessible in every project
+~/Shared|shared|ro
+
+# Downloads for screenshots, PDFs, etc.
+~/Downloads|tmp/downloads|ro
+
+# Application logs
+/var/log/myapp|logs/host|ro
+
+# Writable output directory (use rw when the agent needs to write)
+~/exports|data/exports|rw
+```
+
+**One-off mounts via CLI** (not saved, just for this run):
+
+```bash
+run-claude-sandboxed.sh --mount /tmp/logs:logs ~/myproject
+run-claude-sandboxed.sh --mount ~/data:data:rw ~/myproject
+```
+
+**How it works:**
+
+- Every entry in `mounts.conf` is mounted into every project
+- Each mount appears as a subdirectory inside your project in the container
+- Defaults to read-only (`ro`) if mode is omitted — use `rw` only when the agent needs to write
+- Missing host directories are skipped with a warning
+- No `mounts.conf` file = no extra mounts (existing behavior unchanged)
+- `--mount` flag uses colon-separated format: `/host/path:relative/path[:mode]`
+
+**What it looks like at startup:**
+
+```
+📁 Your project directory:
+   Host: /home/user/dev/my-app
+   Container: /sandboxed_home-user-dev-my-app
+
+📂 Extra mounts:
+   /home/user/Shared → /sandboxed_home-user-dev-my-app/shared (ro)
+   /home/user/Downloads → /sandboxed_home-user-dev-my-app/tmp/downloads (ro)
+```
+
+Changes to `mounts.conf` take effect on the next run — no rebuild needed.
+
+> **See also:** A `mounts.conf.example` file is included in the repository with commented examples.
 
 ### Host Network Access
 

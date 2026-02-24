@@ -15,6 +15,7 @@ Wraps the **official Claude Code** (always pulling the latest npm release) in Do
 - ✅ **Safe experimentation** - Install packages without polluting your system
 - ✅ **Persistent auth** - Login once, relaunches keep you signed in
 - ✅ **Flexible authentication** - Use your Claude subscription (Pro/Team) or Anthropic API account
+- ✅ **Extra mounts** - Mount additional host directories (downloads, datasets, logs) into the container
 
 ## 🛡️ Why Docker Isolation?
 
@@ -233,6 +234,8 @@ run-claude-sandboxed.sh --preset heavy --monitor ~/androidbuilder
 ### Working with Additional Files
 
 Claude Code running in the sandbox can only see files inside your project directory—that's the security isolation at work! If you want to share additional files like screenshots or reference documents, you'll need to copy them into your project so Claude Code in the isolated sandbox can see them. The easiest way is to create a `tmp/` folder for this. You can also use [llms.txt](https://llmstxt.org/) to provide project context—[GitIngest](https://gitingest.com) makes generating these easy.
+
+> **💡 For persistent directories** (downloads, datasets, shared libraries, logs), use **[Extra Mounts](GUIDE.md#extra-mounts)** instead — they mount host directories directly into every session without copying. `tmp/` is best for ad-hoc, session-specific files like screenshots or one-off references.
 
 > **💡 Note:** Custom slash commands work normally in the sandbox since they're part of your Claude Code config.
 > See [GUIDE.md - Custom Agents and Slash Commands](GUIDE.md#custom-agents-and-slash-commands) for storage details.
@@ -453,6 +456,7 @@ run-claude-sandboxed.sh --skip-update-check
 ## 📚 Documentation
 
 - **[GUIDE.md](GUIDE.md)** - Advanced usage, troubleshooting, and configuration
+- **[GUIDE.md - Extra Mounts](GUIDE.md#extra-mounts)** - Mount additional directories (downloads, datasets, logs) into the container
 - **[SECURITY.md](SECURITY.md)** - Complete security architecture and isolation
 
 ---
