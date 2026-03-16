@@ -14,18 +14,23 @@
    - [.sandbox-exit-code](#sandbox-exit-code)
    - [.sandbox-status.json](#sandbox-statusjson)
    - [Schema Reference](#schema-reference)
-4. [Multi-Instance & Naming](#multi-instance--naming)
+4. [Stream Logging (`--log-file`)](#stream-logging---log-file)
+5. [Multi-Instance & Naming](#multi-instance--naming)
    - [Auto-Naming](#auto-naming)
    - [Deterministic Naming with --name](#deterministic-naming-with---name)
    - [Collision Behavior](#collision-behavior)
-5. [Custom Commands](#custom-commands)
-6. [Safety Rules](#safety-rules)
-7. [stream-json Output](#stream-json-output)
-8. [Integration Patterns](#integration-patterns)
-   - [Bash Scripting](#bash-scripting)
-   - [Python Dispatcher](#python-dispatcher)
-   - [Crash Recovery](#crash-recovery)
-9. [Caveats & Limitations](#caveats--limitations)
+6. [Mounting Knowledge Docs](#mounting-knowledge-docs)
+   - [Per-Invocation with --mount](#per-invocation-with---mount)
+   - [Persistent with mounts.conf](#persistent-with-mountsconf)
+   - [Telling the Agent About Mounted Docs](#telling-the-agent-about-mounted-docs)
+7. [Custom Commands](#custom-commands)
+8. [Safety Rules](#safety-rules)
+9. [stream-json Output](#stream-json-output)
+10. [Integration Patterns](#integration-patterns)
+    - [Bash Scripting](#bash-scripting)
+    - [Python Dispatcher](#python-dispatcher)
+    - [Crash Recovery](#crash-recovery)
+11. [Caveats & Limitations](#caveats--limitations)
 
 ---
 
@@ -42,8 +47,8 @@
 #   --dangerously-skip-permissions
 
 # Check the result
-cat ~/myproject/.sandbox-exit-code        # 0, 130, or error code
-cat ~/myproject/.sandbox-status.json      # structured JSON (requires python3 on host)
+cat ~/myproject/.claude/.sandbox-exit-code        # 0, 130, or error code
+cat ~/myproject/.claude/.sandbox-status.json      # structured JSON (requires python3 on host)
 ```
 
 Headless mode suppresses all interactive prompts, UX banners, and version checks. The container runs without a TTY and without the OAuth port mapping, giving a tighter security posture.
@@ -63,8 +68,8 @@ Headless mode suppresses all interactive prompts, UX banners, and version checks
 | Resource limits (when no flags given) | Prompted | Unlimited (no limits) |
 | Version update check | Runs (unless `--skip-update-check`) | Skipped |
 | Resource limit prompts | Shown (unless flags provided) | Skipped |
-| Exit code file | Not written | Written to `$PROJECT_DIR/.sandbox-exit-code` |
-| Status file | Not written | Written to `$PROJECT_DIR/.sandbox-status.json` |
+| Exit code file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-exit-code` |
+| Status file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-status.json` |
 | Container naming | `claude-sandbox-{project}-{port}` | `claude-sandbox-{project}-{random}` (8 hex chars) |
 | Port scan | Scans 3377–3476 for free port | Skipped (port not mapped) |
 
@@ -94,7 +99,7 @@ A single integer — the process exit code:
 Always written. No dependencies.
 
 ```bash
-EXIT_CODE=$(cat ~/myproject/.sandbox-exit-code)
+EXIT_CODE=$(cat ~/myproject/.claude/.sandbox-exit-code)
 ```
 
 ### .sandbox-status.json
@@ -129,6 +134,7 @@ Example:
     "pids": "200"
   },
   "headless": true,
+  "log_file": null,
   "error": ""
 }
 ```
@@ -152,6 +158,7 @@ Example:
 | `container_path` | Script | Container-side project path |
 | `resource_limits` | Script | Object with `preset`, `memory`, `cpus`, `pids` (`null` values = unlimited) |
 | `headless` | Script | Always `true` (only written in headless mode) |
+| `log_file` | Script | Path to the full NDJSON stream log, or `null` if `--log-file` was not used |
 | `error` | stream-json | Error text if `is_error` was true, empty string otherwise |
 
 **"Source" column explained:**
@@ -161,7 +168,7 @@ Example:
 
 ### Custom Status File Path (`--status-file`)
 
-By default, `.sandbox-status.json` is written to the project directory. When running multiple concurrent jobs against the **same** project directory, the last job to exit overwrites the file. Use `--status-file` to write to a per-job path instead:
+By default, `.sandbox-status.json` is written to the project's `.claude/` directory. When running multiple concurrent jobs against the **same** project directory, the last job to exit overwrites the file. Use `--status-file` to write to a per-job path instead:
 
 ```bash
 ./run-claude-sandboxed.sh --headless --status-file /tmp/status-job-42.json ~/myproject
@@ -191,7 +198,57 @@ status = json.loads(Path(status_path).read_text())
 Path(status_path).unlink()
 ```
 
-`.sandbox-exit-code` is always written to the project directory regardless of `--status-file` (it's a simple fallback that doesn't have the same concurrency concern since it's a single integer, and the last writer's value is still a valid exit code).
+`.sandbox-exit-code` is always written to `.claude/` regardless of `--status-file` (it's a simple fallback that doesn't have the same concurrency concern since it's a single integer, and the last writer's value is still a valid exit code).
+
+---
+
+## Stream Logging (`--log-file`)
+
+Save the full stream-json output to a file for post-execution audit, debugging, or dispatcher consumption. The log is NDJSON format (one JSON object per line) — the same stream that flows to stdout, written to a file in parallel.
+
+```bash
+./run-claude-sandboxed.sh --headless --log-file /tmp/job-42.ndjson ~/myproject -- \
+    claude -p "fix the tests" \
+    --output-format stream-json --verbose \
+    --allowedTools "Read,Write,Edit,Bash,Glob,Grep"
+```
+
+**Key details:**
+
+- Only available in headless mode (ignored with a warning otherwise)
+- The stream still flows to stdout in real time — `--log-file` adds a copy, it doesn't redirect
+- The log file path is recorded in `.sandbox-status.json` (`log_file` field) so dispatchers can find it
+- Combine with `--status-file` for fully isolated per-job output:
+
+```bash
+./run-claude-sandboxed.sh --headless \
+    --status-file /tmp/status-job-42.json \
+    --log-file /tmp/log-job-42.ndjson \
+    ~/myproject -- \
+    claude -p "fix the tests" --output-format stream-json --verbose \
+    --allowedTools "Read,Write,Edit,Bash,Glob,Grep"
+```
+
+**Typical orchestrator pattern:**
+
+```python
+import tempfile, os
+
+log_path = tempfile.mktemp(prefix=f"sandbox-log-{job_id}-", suffix=".ndjson")
+status_path = tempfile.mktemp(prefix=f"sandbox-status-{job_id}-", suffix=".json")
+
+cmd = [
+    "./run-claude-sandboxed.sh", "--headless",
+    "--name", f"job-{job_id}",
+    "--status-file", status_path,
+    "--log-file", log_path,
+    project_dir
+]
+
+# After job finishes:
+# - status_path has structured metadata
+# - log_path has the full NDJSON stream for replay/audit
+```
 
 ---
 
@@ -243,6 +300,74 @@ To clean up a stale container programmatically:
 ```bash
 docker rm -f "claude-sandbox-job-42" 2>/dev/null
 ```
+
+---
+
+## Mounting Knowledge Docs
+
+Mount organizational knowledge docs, coding standards, or reference materials into the sandbox so the agent can access them alongside the project files. Docs appear as a subdirectory of the project inside the container — readable with `Read`, searchable with `Glob`/`Grep`.
+
+### Per-Invocation with `--mount`
+
+Pass `--mount` to mount a host directory for a single run:
+
+```bash
+./run-claude-sandboxed.sh --headless \
+    --mount ~/docs/coding-standards:knowledge_docs:ro \
+    ~/myproject -- \
+    claude -p "refactor auth module following our coding standards" \
+    --output-format stream-json --verbose \
+    --allowedTools "Read,Write,Edit,Bash,Glob,Grep"
+```
+
+Format: `/host/path:relative/path[:mode]` — mode defaults to `ro` (read-only).
+
+The docs appear at `./knowledge_docs/` inside the container, relative to the project root.
+
+### Persistent with `mounts.conf`
+
+For docs that should be available in every sandbox run, add an entry to `mounts.conf`:
+
+```bash
+cp mounts.conf.example mounts.conf
+```
+
+Then add:
+
+```
+~/docs/coding-standards|knowledge_docs|ro
+```
+
+Format: `host_path|relative_path|mode` (pipe-delimited). See `mounts.conf.example` for more examples.
+
+`mounts.conf` entries apply to all projects — both interactive and headless. Changes take effect on the next run.
+
+### Telling the Agent About Mounted Docs
+
+The mount alone isn't enough — the agent needs to know the docs exist. Include a pointer in the task prompt:
+
+```bash
+claude -p "Organizational knowledge docs are mounted read-only at ./knowledge_docs/.
+Use 'Glob knowledge_docs/**/*.md' to discover available references.
+Key docs: style-guide.md, api-conventions.md
+
+Now: refactor the auth module following our coding standards." \
+    --output-format stream-json --verbose \
+    --allowedTools "Read,Write,Edit,Bash,Glob,Grep"
+```
+
+For dispatchers, append the knowledge pointer to the task prompt programmatically:
+
+```python
+knowledge_hint = """
+Organizational knowledge docs are available at ./knowledge_docs/.
+Use `Glob knowledge_docs/**/*.md` to discover references.
+"""
+
+full_prompt = f"{knowledge_hint}\n\n{user_task}"
+```
+
+**Concurrent safety:** Multiple sandbox instances can share the same `--mount` source directory safely. Read-only mounts (`ro`) have no write contention. Each instance has its own container and its own `--status-file` / `--log-file` paths — the shared mount doesn't interfere.
 
 ---
 
@@ -311,17 +436,17 @@ When running `claude -p "prompt" --output-format stream-json --verbose`, Claude 
     --allowedTools "Read,Write,Edit,Bash,Glob,Grep"
 
 # Check exit code
-EXIT_CODE=$(cat ~/myproject/.sandbox-exit-code)
+EXIT_CODE=$(cat ~/myproject/.claude/.sandbox-exit-code)
 if [ "$EXIT_CODE" -ne 0 ]; then
     echo "Failed with exit code $EXIT_CODE"
     exit 1
 fi
 
 # Read structured result (if python3 was available)
-if [ -f ~/myproject/.sandbox-status.json ]; then
+if [ -f ~/myproject/.claude/.sandbox-status.json ]; then
     python3 -c "
 import json
-status = json.load(open('$HOME/myproject/.sandbox-status.json'))
+status = json.load(open('$HOME/myproject/.claude/.sandbox-status.json'))
 print(f\"Cost: \${status['cost_usd']}, Turns: {status['num_turns']}\")
 "
 fi
@@ -346,12 +471,12 @@ def run_sandbox(project_dir: str, prompt: str, name: str = None) -> dict:
     proc = subprocess.run(cmd, capture_output=False)
 
     # Read status file
-    status_file = Path(project_dir) / ".sandbox-status.json"
+    status_file = Path(project_dir) / ".claude" / ".sandbox-status.json"
     if status_file.exists():
         return json.loads(status_file.read_text())
 
     # Fallback to exit code only
-    exit_file = Path(project_dir) / ".sandbox-exit-code"
+    exit_file = Path(project_dir) / ".claude" / ".sandbox-exit-code"
     return {"exit_code": int(exit_file.read_text().strip())}
 
 result = run_sandbox("/home/user/myproject", "fix the failing tests", name="fix-tests")
@@ -362,8 +487,8 @@ print(f"Exit: {result['exit_code']}, Session: {result.get('session_id')}")
 
 If your dispatcher/orchestrator crashes while a sandbox is running, the container finishes independently (it's a detached Docker process from the host's perspective). When it exits:
 
-- `.sandbox-exit-code` is written
-- `.sandbox-status.json` is written (if python3 available)
+- `.claude/.sandbox-exit-code` is written
+- `.claude/.sandbox-status.json` is written (if python3 available)
 - The container is removed (`--rm`)
 
 On restart, your dispatcher can scan project directories for status files to recover results:
@@ -375,7 +500,7 @@ import json
 def recover_results(project_dirs: list[str]) -> list[dict]:
     results = []
     for proj in project_dirs:
-        status = Path(proj) / ".sandbox-status.json"
+        status = Path(proj) / ".claude" / ".sandbox-status.json"
         if status.exists():
             results.append(json.loads(status.read_text()))
     return results
@@ -398,7 +523,7 @@ The status file persists until overwritten by the next headless run against the 
 
 ### Same project directory, multiple concurrent instances
 
-If you launch multiple headless instances against the **same project directory**, they all write to the same `.sandbox-exit-code` and (by default) `.sandbox-status.json`. The last one to exit wins. Solutions:
+If you launch multiple headless instances against the **same project directory**, they all write to the same `.claude/.sandbox-exit-code` and (by default) `.claude/.sandbox-status.json`. The last one to exit wins. Solutions:
 
 - **Use `--status-file`** to write each job's status to a unique path (recommended for orchestrators)
 - Use different project directories per job (already isolated)
@@ -406,7 +531,7 @@ If you launch multiple headless instances against the **same project directory**
 
 ### python3 required for `.sandbox-status.json`
 
-The status file is built by an inline python3 script on the host. If python3 is not installed, only `.sandbox-exit-code` is written. The container itself doesn't need python3 (it has it in the image), but the host does for post-exit parsing.
+The status file is built by an inline python3 script on the host. If python3 is not installed, only `.claude/.sandbox-exit-code` is written. The container itself doesn't need python3 (it has it in the image), but the host does for post-exit parsing.
 
 ### Tool permissions in headless mode
 
@@ -464,6 +589,31 @@ Add `WebFetch` or `WebSearch` if the job needs internet access. Add `Task,TaskOu
 
 Neither flag is needed when running custom commands (e.g., `-- python3 script.py`) since those don't go through Claude's permission system.
 
+### `--max-turns` for session length control
+
+`--max-turns N` limits how many tool-call rounds Claude Code can make before the session stops. Each "turn" is one cycle of: Claude thinks → calls a tool → gets the result → thinks again.
+
+```bash
+./run-claude-sandboxed.sh --headless ~/myproject -- \
+    claude -p "fix the tests" --output-format stream-json --verbose \
+    --dangerously-skip-permissions --max-turns 20
+```
+
+When the limit is reached, the session ends with `stop_reason: "max_turns"` in the stream-json result event. The exit code is still 0 (not an error — the agent simply ran out of steps).
+
+**Choosing a value:**
+
+| Task type | Suggested max-turns | Why |
+|-----------|-------------------|-----|
+| Simple file edit, add a comment | 5-10 | 2-3 turns for read + edit + verify |
+| Standard coding task | 15-20 | Read files, plan, implement, test |
+| Complex multi-file refactoring | 25-35 | Many files to read, edit, cross-reference |
+| Open-ended research + implementation | 30-50 | Agent needs room to explore and iterate |
+
+**Without `--max-turns`:** Claude Code runs until it decides it's done (`stop_reason: "end_turn"`) or hits an error. For automated/orchestrated use, always set a limit to prevent runaway sessions.
+
+**Prompt tip for orchestrators:** If your agent needs to perform a signaling action after its main work (e.g., calling an API to report completion), put that step early in the prompt — before optional verification steps. This ensures the signal fires even if the agent runs out of turns during polish.
+
 ### `--verbose` required for stream-json
 
 Claude Code requires `--verbose` when combining `-p` with `--output-format stream-json`. Without it, the CLI exits with an error. Make sure your commands include both flags.
@@ -474,4 +624,4 @@ Headless mode does not map the OAuth port (`-p $PORT:3000`), so the browser-base
 
 ### Container is ephemeral
 
-Containers use `--rm` and are deleted on exit. You cannot `docker inspect` or `docker logs` a container after it finishes. The status file is the only post-exit record. If you need logs, capture stdout/stderr from the process or use `docker logs` while the container is still running.
+Containers use `--rm` and are deleted on exit. You cannot `docker inspect` or `docker logs` a container after it finishes. The status file and log file (if `--log-file` was used) are the only post-exit records. If you need the full stream log, use `--log-file` to persist it, or capture stdout/stderr from the process.

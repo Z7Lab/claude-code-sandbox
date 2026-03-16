@@ -8,9 +8,7 @@ mounts.conf
 # Claude Code settings (auto-created when running Claude in this directory)
 .claude/
 
-# Sandbox status files (written during headless/programmatic use)
-.sandbox-exit-code
-.sandbox-status.json
+# Sandbox status files now written to .claude/ (already gitignored above)
 
 # Development workspace (see README.md for workflow usage)
 tmp/

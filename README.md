@@ -461,8 +461,8 @@ Yes! Use `--headless` for scripting, CI, or automation:
 
 ```bash
 run-claude-sandboxed.sh --headless ~/myproject
-cat ~/myproject/.sandbox-exit-code       # exit code
-cat ~/myproject/.sandbox-status.json     # structured JSON result
+cat ~/myproject/.claude/.sandbox-exit-code       # exit code
+cat ~/myproject/.claude/.sandbox-status.json     # structured JSON result
 ```
 
 > **📖 See:** [HEADLESS.md](HEADLESS.md) for the full automation guide — status file schema, multi-instance naming, integration patterns, and more.

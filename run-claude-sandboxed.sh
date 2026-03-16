@@ -57,6 +57,7 @@ CLI_MOUNTS=()  # Extra mounts from --mount flags
 HEADLESS_MODE=false  # Headless mode for programmatic/dispatcher use
 CUSTOM_CMD=()  # Custom command to run instead of 'claude' (everything after --)
 STATUS_FILE=""  # Custom path for .sandbox-status.json (for orchestrators with concurrent jobs)
+LOG_FILE=""  # Custom path for full stream-json log (headless only)
 
 # Function to find an available port
 find_available_port() {
@@ -207,6 +208,14 @@ while [[ $# -gt 0 ]]; do
             STATUS_FILE="$2"
             shift 2
             ;;
+        --log-file)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ ERROR: --log-file requires a path argument"
+                exit 1
+            fi
+            LOG_FILE="$2"
+            shift 2
+            ;;
         --)
             shift
             CUSTOM_CMD=("$@")
@@ -269,6 +278,12 @@ fi
 if [ -n "$STATUS_FILE" ] && [ "$HEADLESS_MODE" != true ]; then
     echo "⚠️  Warning: --status-file is only used in --headless mode. Ignoring."
     STATUS_FILE=""
+fi
+
+# Warn if --log-file is used without --headless (it would be silently ignored)
+if [ -n "$LOG_FILE" ] && [ "$HEADLESS_MODE" != true ]; then
+    echo "⚠️  Warning: --log-file is only used in --headless mode. Ignoring."
+    LOG_FILE=""
 fi
 
 # Create cache directories if they don't exist
@@ -1060,8 +1075,13 @@ _run_docker() {
 }
 
 if [ -n "$STREAM_CAPTURE_FILE" ]; then
-    # Headless: tee stdout, capturing only the result line and file-modifying tool calls
-    _run_docker | tee >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+    if [ -n "$LOG_FILE" ]; then
+        # Headless with --log-file: tee to both the log file and the filtered capture file
+        _run_docker | tee "$LOG_FILE" >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+    else
+        # Headless: tee stdout, capturing only the result line and file-modifying tool calls
+        _run_docker | tee >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+    fi
     DOCKER_EXIT_CODE=${PIPESTATUS[0]}
     # Wait for process substitution to finish writing
     sleep 0.2
@@ -1074,8 +1094,10 @@ fi
 FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Write status files for headless/programmatic use
+# Files go in .claude/ (already gitignored by Claude Code)
 if [ "$HEADLESS_MODE" = true ]; then
-    echo "$DOCKER_EXIT_CODE" > "$PROJECT_DIR/.sandbox-exit-code"
+    mkdir -p "$PROJECT_DIR/.claude"
+    echo "$DOCKER_EXIT_CODE" > "$PROJECT_DIR/.claude/.sandbox-exit-code"
 
     # Build .sandbox-status.json by merging script-known fields with parsed stream-json
     # Uses python3 to parse the result line and extract file paths from tool_use events
@@ -1155,6 +1177,7 @@ status = {
     'container_path': script_data['container_path'],
     'resource_limits': script_data['resource_limits'],
     'headless': True,
+    'log_file': sys.argv[13] if len(sys.argv) > 13 and sys.argv[13] else None,
     'error': parsed.get('result', '') if parsed.get('is_error') else '',
 }
 
@@ -1172,11 +1195,12 @@ print()
             "$MEMORY_LIMIT" \
             "$CPU_LIMIT" \
             "$PIDS_LIMIT" \
-            "$STREAM_CAPTURE_FILE"
+            "$STREAM_CAPTURE_FILE" \
+            "$LOG_FILE"
     }
 
-    # Determine status file path: --status-file overrides, otherwise default to project dir
-    _STATUS_OUTPUT="${STATUS_FILE:-$PROJECT_DIR/.sandbox-status.json}"
+    # Determine status file path: --status-file overrides, otherwise default to .claude/
+    _STATUS_OUTPUT="${STATUS_FILE:-$PROJECT_DIR/.claude/.sandbox-status.json}"
 
     if command -v python3 &>/dev/null; then
         _build_status_json > "$_STATUS_OUTPUT" 2>/dev/null
