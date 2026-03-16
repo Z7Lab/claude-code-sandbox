@@ -398,13 +398,38 @@ iptables -I DOCKER-USER -p tcp -d 172.17.0.1 -j DROP
 - **No network at all:** `--network=none` (requires editing the script)
 - **Specific domains only:** Requires custom Docker network with DNS filtering
 
-#### 4. Process Isolation
+#### 4. Headless Mode (Tighter Isolation)
+
+When using `--headless`, the sandbox has a stricter posture than interactive mode:
+
+- **No TTY allocated** — reduces attack surface (no terminal escape sequence exploits)
+- **No OAuth port mapped** — container port 3000 is not exposed on the host
+- **No interactive prompts** — destructive operations (`--fresh`, container collisions) are refused rather than auto-confirmed
+
+##### Headless Mode and Tool Permissions
+
+Headless Claude use requires either `--allowedTools "Read,Write,Edit,Bash,Glob,Grep"` (explicit whitelist, recommended) or `--dangerously-skip-permissions` (blanket allow) because there's no TTY to approve tool calls. Without one of these, tool calls are denied.
+
+**Why this is safe in the sandbox:** Claude Code's permission system is an application-level safeguard designed for bare-host use where Claude has access to your entire filesystem. Inside the Docker sandbox, kernel-level isolation already limits access to only the mounted project directory. The two protections overlap — skipping the application-level one doesn't weaken the kernel-level one.
+
+| Protection | Interactive sandbox | Headless sandbox |
+|---|---|---|
+| Docker filesystem isolation | Yes | Yes |
+| Docker process/network isolation | Yes | Yes |
+| Claude permission prompts | Yes (user approves) | Scoped (`--allowedTools`) or skipped (`--dangerously-skip-permissions`) |
+| Effective security | Docker + permissions | Docker alone (sufficient) |
+
+> **📖 See:** [HEADLESS.md - Tool permissions](HEADLESS.md#tool-permissions-in-headless-mode) for the full list of available tools.
+
+> **📖 See:** [HEADLESS.md](HEADLESS.md) for the full headless automation guide.
+
+#### 5. Process Isolation
 
 - Container processes can't see host processes
 - Can limit CPU and memory usage
 - Can limit number of processes
 
-#### 5. Complete Reset Capability
+#### 6. Complete Reset Capability
 
 - **Container deletion** (automatic with `--rm` flag):
   - Container removed when session ends

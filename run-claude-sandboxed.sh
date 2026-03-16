@@ -54,6 +54,9 @@ PORT=""  # Empty = auto-select
 PORT_AUTO=true
 INSTANCE_NAME=""  # Optional: user-provided instance name
 CLI_MOUNTS=()  # Extra mounts from --mount flags
+HEADLESS_MODE=false  # Headless mode for programmatic/dispatcher use
+CUSTOM_CMD=()  # Custom command to run instead of 'claude' (everything after --)
+STATUS_FILE=""  # Custom path for .sandbox-status.json (for orchestrators with concurrent jobs)
 
 # Function to find an available port
 find_available_port() {
@@ -190,6 +193,25 @@ while [[ $# -gt 0 ]]; do
             CLI_MOUNTS+=("$2")
             shift 2
             ;;
+        --headless)
+            HEADLESS_MODE=true
+            SKIP_UPDATE_CHECK=true
+            SKIP_RESOURCE_PROMPTS=true
+            shift
+            ;;
+        --status-file)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ ERROR: --status-file requires a path argument"
+                exit 1
+            fi
+            STATUS_FILE="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            CUSTOM_CMD=("$@")
+            break
+            ;;
         --list|-l)
             # Already handled above, but include for completeness
             list_instances
@@ -223,19 +245,30 @@ if [ "$FRESH_START" = true ]; then
     echo ""
     echo "You will need to re-authenticate with your Anthropic account."
     echo ""
-    read -p "Are you sure you want to continue? [y/N]: " -n 1 -r
-    echo ""
-    echo ""
-
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Resetting Claude Code Sandbox..."
-        rm -rf "$CACHE_DIR"
-        echo "✅ All data cleared"
-        echo ""
+    if [ "$HEADLESS_MODE" = true ]; then
+        echo "❌ ERROR: --fresh cannot be used with --headless (destructive operation requires confirmation)"
+        exit 1
     else
-        echo "Cancelled. No changes made."
-        exit 0
+        read -p "Are you sure you want to continue? [y/N]: " -n 1 -r
+        echo ""
+        echo ""
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Resetting Claude Code Sandbox..."
+            rm -rf "$CACHE_DIR"
+            echo "✅ All data cleared"
+            echo ""
+        else
+            echo "Cancelled. No changes made."
+            exit 0
+        fi
     fi
+fi
+
+# Warn if --status-file is used without --headless (it would be silently ignored)
+if [ -n "$STATUS_FILE" ] && [ "$HEADLESS_MODE" != true ]; then
+    echo "⚠️  Warning: --status-file is only used in --headless mode. Ignoring."
+    STATUS_FILE=""
 fi
 
 # Create cache directories if they don't exist
@@ -347,16 +380,25 @@ fi
 GIT_NAME=$(git config --global user.name 2>/dev/null || echo "Claude User")
 GIT_EMAIL=$(git config --global user.email 2>/dev/null || echo "claude@local")
 
-# Auto-select port if not specified
-if [ "$PORT_AUTO" = true ] || [ -z "$PORT" ]; then
-    PORT=$(find_available_port 3377)
-    if [ $? -ne 0 ]; then
-        echo "⚠️  Warning: Could not verify port availability. Using port $PORT"
+# Auto-select port if not specified (skip in headless — port is never mapped)
+if [ "$HEADLESS_MODE" != true ]; then
+    if [ "$PORT_AUTO" = true ] || [ -z "$PORT" ]; then
+        PORT=$(find_available_port 3377)
+        if [ $? -ne 0 ]; then
+            echo "⚠️  Warning: Could not verify port availability. Using port $PORT"
+        fi
     fi
 fi
 
 # Generate unique container name
-CONTAINER_NAME=$(generate_container_name "$PROJECT_DIR" "$PORT" "$INSTANCE_NAME")
+# In headless mode without --name, use a random suffix instead of port
+# to avoid collisions when multiple headless instances run concurrently
+if [ "$HEADLESS_MODE" = true ] && [ -z "$INSTANCE_NAME" ]; then
+    RANDOM_SUFFIX=$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    CONTAINER_NAME=$(generate_container_name "$PROJECT_DIR" "$RANDOM_SUFFIX" "")
+else
+    CONTAINER_NAME=$(generate_container_name "$PROJECT_DIR" "$PORT" "$INSTANCE_NAME")
+fi
 
 # Check if this specific container name already exists
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -374,18 +416,25 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     fi
 
     echo ""
-    read -p "Remove existing container and continue? [y/N]: " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Removing container..."
-        docker rm -f "$CONTAINER_NAME" 2>/dev/null
-        echo "✅ Container removed"
-        echo ""
-    else
-        echo "Cancelled."
-        echo ""
-        echo "Tip: Run '$0 --list' to see all running instances"
+    if [ "$HEADLESS_MODE" = true ]; then
+        echo "❌ ERROR: Container '$CONTAINER_NAME' already exists. In headless mode, this is not auto-removed."
+        echo "   Remove it manually:  docker rm -f $CONTAINER_NAME"
+        echo "   Or use a unique name: --name <name>"
         exit 1
+    else
+        read -p "Remove existing container and continue? [y/N]: " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Removing container..."
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null
+            echo "✅ Container removed"
+            echo ""
+        else
+            echo "Cancelled."
+            echo ""
+            echo "Tip: Run '$0 --list' to see all running instances"
+            exit 1
+        fi
     fi
 fi
 
@@ -401,8 +450,16 @@ if [ ! -f "$CONFIG_DIR/.claude/.credentials.json" ]; then
     IS_FIRST_RUN=true
 fi
 
-# Get installed version from Docker image (always - for display)
-INSTALLED_VERSION=$(docker run --rm --entrypoint sh claude-code-sandbox -c "claude --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" 2>/dev/null)
+# Skip version check entirely for custom commands (not running claude)
+if [ ${#CUSTOM_CMD[@]} -gt 0 ]; then
+    SKIP_UPDATE_CHECK=true
+fi
+
+# Get installed version from Docker image (only when running default claude command)
+INSTALLED_VERSION=""
+if [ ${#CUSTOM_CMD[@]} -eq 0 ]; then
+    INSTALLED_VERSION=$(docker run --rm --entrypoint sh claude-code-sandbox -c "claude --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" 2>/dev/null)
+fi
 
 # Initialize version check status
 VERSION_CHECK_STATUS="skipped"
@@ -530,86 +587,100 @@ if [ "$SKIP_UPDATE_CHECK" = false ]; then
     fi
 fi
 
-echo "================================================================"
-if [ "$IS_FIRST_RUN" = true ]; then
-    echo "⛱️  Welcome to Claude Code Sandbox"
+# Determine display name based on whether custom command is used
+if [ ${#CUSTOM_CMD[@]} -gt 0 ]; then
+    PROCESS_LABEL="${CUSTOM_CMD[0]}"
 else
-    echo "⛱️  Welcome Back! - Claude Code Sandbox"
+    PROCESS_LABEL="Claude Code"
 fi
-echo "================================================================"
-echo ""
 
-# Show Claude Code version information
-if [ -n "$INSTALLED_VERSION" ]; then
-    echo "📦 Claude Code Versions:"
-    echo "   Installed: $INSTALLED_VERSION"
-
-    # Show latest version and status
-    if [ "$VERSION_CHECK_STATUS" = "up-to-date" ]; then
-        echo "   Latest:    $LATEST_VERSION"
-        echo "   Status:    ✅ Up to date"
-    elif [ "$VERSION_CHECK_STATUS" = "update-available" ]; then
-        echo "   Latest:    $LATEST_VERSION"
-        echo "   Status:    🔔 Update available (skipped for now)"
-    elif [ "$VERSION_CHECK_STATUS" = "failed" ]; then
-        echo "   Latest:    ❌ Check failed (timeout or network issue)"
-        echo "   Status:    ⚠️  Could not verify latest version"
-    elif [ "$VERSION_CHECK_STATUS" = "skipped" ]; then
-        echo "   Latest:    (check skipped with --skip-update-check)"
-        echo "   Status:    ⏭️  Version check disabled"
+# Skip all UX banners in headless mode
+if [ "$HEADLESS_MODE" != true ]; then
+    echo "================================================================"
+    if [ "$IS_FIRST_RUN" = true ]; then
+        echo "⛱️  Welcome to ${PROCESS_LABEL} Sandbox"
+    else
+        echo "⛱️  Welcome Back! - ${PROCESS_LABEL} Sandbox"
     fi
-    echo ""
-fi
-
-if [ "$IS_FIRST_RUN" = true ]; then
-    echo "A Docker-wrapped version of Claude Code for safe isolation."
-    echo ""
-    echo "ℹ️  This wraps the official Claude Code in Docker for isolation."
-    echo "    Official Claude Code: https://github.com/anthropics/claude-code"
-    echo "    Documentation: https://docs.anthropic.com/docs/claude-code"
     echo "================================================================"
     echo ""
-fi
 
-# Show instance information (important for multi-instance use)
-echo "🐳 Instance Information:"
-echo "   Container name: $CONTAINER_NAME"
-echo "   Auth port:      $PORT"
-if [ "$PORT_AUTO" = true ]; then
-    echo "   (Port auto-selected. Use --port <number> to specify)"
-fi
-echo ""
+    # Show Claude Code version information (only for default claude command)
+    if [ -n "$INSTALLED_VERSION" ]; then
+        echo "📦 Claude Code Versions:"
+        echo "   Installed: $INSTALLED_VERSION"
 
-# Count other running instances
-RUNNING_COUNT=$(docker ps --filter "name=claude-sandbox-" --format "{{.Names}}" 2>/dev/null | wc -l)
-if [ "$RUNNING_COUNT" -gt 0 ]; then
-    echo "   📊 Other running instances: $RUNNING_COUNT"
-    echo "   (Run '$0 --list' to see all)"
+        # Show latest version and status
+        if [ "$VERSION_CHECK_STATUS" = "up-to-date" ]; then
+            echo "   Latest:    $LATEST_VERSION"
+            echo "   Status:    ✅ Up to date"
+        elif [ "$VERSION_CHECK_STATUS" = "update-available" ]; then
+            echo "   Latest:    $LATEST_VERSION"
+            echo "   Status:    🔔 Update available (skipped for now)"
+        elif [ "$VERSION_CHECK_STATUS" = "failed" ]; then
+            echo "   Latest:    ❌ Check failed (timeout or network issue)"
+            echo "   Status:    ⚠️  Could not verify latest version"
+        elif [ "$VERSION_CHECK_STATUS" = "skipped" ]; then
+            echo "   Latest:    (check skipped with --skip-update-check)"
+            echo "   Status:    ⏭️  Version check disabled"
+        fi
+        echo ""
+    fi
+
+    if [ "$IS_FIRST_RUN" = true ] && [ ${#CUSTOM_CMD[@]} -eq 0 ]; then
+        echo "A Docker-wrapped version of Claude Code for safe isolation."
+        echo ""
+        echo "ℹ️  This wraps the official Claude Code in Docker for isolation."
+        echo "    Official Claude Code: https://github.com/anthropics/claude-code"
+        echo "    Documentation: https://docs.anthropic.com/docs/claude-code"
+        echo "================================================================"
+        echo ""
+    fi
+
+    # Show instance information (important for multi-instance use)
+    echo "🐳 Instance Information:"
+    echo "   Container name: $CONTAINER_NAME"
+    if [ ${#CUSTOM_CMD[@]} -eq 0 ]; then
+        echo "   Auth port:      $PORT"
+        if [ "$PORT_AUTO" = true ]; then
+            echo "   (Port auto-selected. Use --port <number> to specify)"
+        fi
+    fi
+    echo ""
+
+    # Count other running instances
+    RUNNING_COUNT=$(docker ps --filter "name=claude-sandbox-" --format "{{.Names}}" 2>/dev/null | wc -l)
+    if [ "$RUNNING_COUNT" -gt 0 ]; then
+        echo "   📊 Other running instances: $RUNNING_COUNT"
+        echo "   (Run '$0 --list' to see all)"
+        echo ""
+    fi
+
+    echo "📁 Your project directory:"
+    echo "   Host: $PROJECT_DIR"
+    echo "   Container: $CONTAINER_PATH"
+    echo ""
+    echo "   → ${PROCESS_LABEL} can ONLY access files in this directory (plus any extra mounts)"
+    echo "   → Each project has isolated permissions and session history"
+fi  # end headless check
+
+if [ "$HEADLESS_MODE" != true ]; then
+    echo ""
+    if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+        echo "📂 Extra mounts:"
+        for line in "${EXTRA_MOUNT_LINES[@]}"; do
+            echo "   $line"
+        done
+    elif [ -f "$EXTRA_MOUNTS_CONF" ]; then
+        echo "📂 Extra mounts: none for this project"
+    else
+        echo "📂 Extra mounts: none (see mounts.conf.example to configure)"
+    fi
+    echo ""
+    echo "🔧 ${PROCESS_LABEL} Sandbox tool location:"
+    echo "   $SANDBOX_DIR"
     echo ""
 fi
-
-echo "📁 Your project directory:"
-echo "   Host: $PROJECT_DIR"
-echo "   Container: $CONTAINER_PATH"
-echo ""
-echo "   → Claude can ONLY access files in this directory (plus any extra mounts)"
-echo "   → Each project has isolated permissions and session history"
-
-echo ""
-if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
-    echo "📂 Extra mounts:"
-    for line in "${EXTRA_MOUNT_LINES[@]}"; do
-        echo "   $line"
-    done
-elif [ -f "$EXTRA_MOUNTS_CONF" ]; then
-    echo "📂 Extra mounts: none for this project"
-else
-    echo "📂 Extra mounts: none (see mounts.conf.example to configure)"
-fi
-echo ""
-echo "🔧 Claude Code Sandbox tool location:"
-echo "   $SANDBOX_DIR"
-echo ""
 
 # Resource limits configuration (interactive or from flags/saved settings)
 if [ "$SKIP_RESOURCE_PROMPTS" = false ]; then
@@ -781,75 +852,77 @@ EOF
     fi
 fi
 
-if [ "$IS_FIRST_RUN" = true ]; then
-    echo "================================================================"
-    echo "🔑 FIRST RUN - AUTHENTICATION REQUIRED"
-    echo "================================================================"
-    echo ""
-    echo "This sandbox runs the official Claude Code inside Docker."
-    echo ""
-    echo "Authentication:"
-    echo "   • A link will be provided to authenticate via browser"
-    echo "   • Login with your Anthropic account"
-    echo "   • Choose: Claude subscription (Pro/Team) or API account"
-    echo ""
-    echo "Credentials saved to:"
-    echo "   $CONFIG_DIR/.claude/"
-    echo ""
-    echo "================================================================"
-    echo "⚠️  IMPORTANT - READ BEFORE STARTING"
-    echo "================================================================"
-    echo ""
-    echo "Inside the sandbox, your project appears as:"
-    echo "   $CONTAINER_PATH"
-    echo ""
-    echo "Always reference files as:"
-    echo "   ✅ $CONTAINER_PATH/src/app.py"
-    echo "   ✅ $CONTAINER_PATH/tests/test.py"
-    echo ""
-    echo "NOT as:"
-    echo "   ❌ $PROJECT_DIR/src/app.py"
-    echo ""
-    echo "When Claude asks 'Do you trust $CONTAINER_PATH?'"
-    echo "   → Answer YES"
-    echo "   → This IS your isolated project directory"
-    echo "   → Docker isolation protects your system"
-    echo ""
-    echo "================================================================"
-    if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+if [ "$HEADLESS_MODE" != true ]; then
+    if [ "$IS_FIRST_RUN" = true ] && [ ${#CUSTOM_CMD[@]} -eq 0 ]; then
+        echo "================================================================"
+        echo "🔑 FIRST RUN - AUTHENTICATION REQUIRED"
+        echo "================================================================"
         echo ""
-        echo "📂 Extra mounts:"
-        for line in "${EXTRA_MOUNT_LINES[@]}"; do
-            echo "   $line"
-        done
-    fi
-    echo ""
-    read -p "Press ENTER to start (or Ctrl+C to cancel)... "
-    echo ""
-else
-    echo "💡 REMINDER: Use container path when prompting Claude"
-    echo ""
-    echo "   Claude sees:"
-    echo "   ✅ $CONTAINER_PATH/yourfile.py"
-    echo ""
-    echo "   NOT your host path:"
-    echo "   ❌ $PROJECT_DIR/yourfile.py"
-    if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+        echo "This sandbox runs the official Claude Code inside Docker."
         echo ""
-        echo "📂 Extra mounts:"
-        for line in "${EXTRA_MOUNT_LINES[@]}"; do
-            echo "   $line"
-        done
+        echo "Authentication:"
+        echo "   • A link will be provided to authenticate via browser"
+        echo "   • Login with your Anthropic account"
+        echo "   • Choose: Claude subscription (Pro/Team) or API account"
+        echo ""
+        echo "Credentials saved to:"
+        echo "   $CONFIG_DIR/.claude/"
+        echo ""
+        echo "================================================================"
+        echo "⚠️  IMPORTANT - READ BEFORE STARTING"
+        echo "================================================================"
+        echo ""
+        echo "Inside the sandbox, your project appears as:"
+        echo "   $CONTAINER_PATH"
+        echo ""
+        echo "Always reference files as:"
+        echo "   ✅ $CONTAINER_PATH/src/app.py"
+        echo "   ✅ $CONTAINER_PATH/tests/test.py"
+        echo ""
+        echo "NOT as:"
+        echo "   ❌ $PROJECT_DIR/src/app.py"
+        echo ""
+        echo "When Claude asks 'Do you trust $CONTAINER_PATH?'"
+        echo "   → Answer YES"
+        echo "   → This IS your isolated project directory"
+        echo "   → Docker isolation protects your system"
+        echo ""
+        echo "================================================================"
+        if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "📂 Extra mounts:"
+            for line in "${EXTRA_MOUNT_LINES[@]}"; do
+                echo "   $line"
+            done
+        fi
+        echo ""
+        read -p "Press ENTER to start (or Ctrl+C to cancel)... "
+        echo ""
+    else
+        echo "💡 REMINDER: Use container path when prompting ${PROCESS_LABEL}"
+        echo ""
+        echo "   ${PROCESS_LABEL} sees:"
+        echo "   ✅ $CONTAINER_PATH/yourfile.py"
+        echo ""
+        echo "   NOT your host path:"
+        echo "   ❌ $PROJECT_DIR/yourfile.py"
+        if [ ${#EXTRA_MOUNT_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "📂 Extra mounts:"
+            for line in "${EXTRA_MOUNT_LINES[@]}"; do
+                echo "   $line"
+            done
+        fi
+        echo ""
+        read -p "Press ENTER to start (or Ctrl+C to cancel)... "
+        echo ""
     fi
-    echo ""
-    read -p "Press ENTER to start (or Ctrl+C to cancel)... "
+
+    echo "Starting ${PROCESS_LABEL} in isolated Docker container..."
+    echo "Press Ctrl+C to exit"
+    echo "================================================================"
     echo ""
 fi
-
-echo "Starting Claude Code in isolated Docker container..."
-echo "Press Ctrl+C to exit"
-echo "================================================================"
-echo ""
 
 # Setup monitoring if enabled
 STATS_LOG=""
@@ -929,33 +1002,189 @@ if [ "$ALLOW_HOST_SERVICES" = true ]; then
     HOST_ACCESS_FLAG="--add-host=host.docker.internal:host-gateway"
 fi
 
-# Run Docker with host user UID/GID to prevent permission issues
-# Files created by Claude will be owned by you, not root
-# Each project gets a unique container path for isolated permissions/sessions
-docker run -it --rm \
-    --name "$CONTAINER_NAME" \
-    $RESOURCE_FLAGS \
-    --user "$(id -u):$(id -g)" \
-    -e HOME=/home/claude \
-    $HOST_ACCESS_FLAG \
-    -p "$PORT:3000" \
-    -v "$PROJECT_DIR:$CONTAINER_PATH:rw" \
-    $EXTRA_MOUNT_FLAGS \
-    -v "$CACHE_DIR/pip:/cache/pip:rw" \
-    -v "$CACHE_DIR/npm:/cache/npm:rw" \
-    -v "$CONFIG_DIR:/home/claude:rw" \
-    -e PIP_CACHE_DIR=/cache/pip \
-    -e NPM_CONFIG_CACHE=/cache/npm \
-    -e GIT_AUTHOR_NAME="$GIT_NAME" \
-    -e GIT_AUTHOR_EMAIL="$GIT_EMAIL" \
-    -e GIT_COMMITTER_NAME="$GIT_NAME" \
-    -e GIT_COMMITTER_EMAIL="$GIT_EMAIL" \
-    -w "$CONTAINER_PATH" \
-    claude-code-sandbox \
-    claude
+# Build docker run flags based on mode
+if [ "$HEADLESS_MODE" = true ]; then
+    DOCKER_RUN_FLAGS="-i --rm"
+else
+    DOCKER_RUN_FLAGS="-it --rm"
+fi
 
-# Capture exit code
-DOCKER_EXIT_CODE=$?
+# Build port mapping flag (skip in headless mode)
+PORT_FLAG=""
+if [ "$HEADLESS_MODE" != true ]; then
+    PORT_FLAG="-p $PORT:3000"
+fi
+
+# Determine the command to run
+if [ ${#CUSTOM_CMD[@]} -gt 0 ]; then
+    CONTAINER_CMD=("${CUSTOM_CMD[@]}")
+else
+    CONTAINER_CMD=("claude")
+fi
+
+# Record start time for status file
+STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# In headless mode, tee stdout to a temp file so we can parse status after exit.
+# We filter for only the lines we need: the result event and file-modifying tool calls.
+STREAM_CAPTURE_FILE=""
+if [ "$HEADLESS_MODE" = true ]; then
+    STREAM_CAPTURE_FILE=$(mktemp /tmp/sandbox-stream-capture.XXXXXX)
+fi
+
+# Run Docker with host user UID/GID to prevent permission issues
+# Files created by the process will be owned by you, not root
+# Each project gets a unique container path for isolated permissions/sessions
+_run_docker() {
+    docker run $DOCKER_RUN_FLAGS \
+        --name "$CONTAINER_NAME" \
+        $RESOURCE_FLAGS \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/home/claude \
+        $HOST_ACCESS_FLAG \
+        $PORT_FLAG \
+        -v "$PROJECT_DIR:$CONTAINER_PATH:rw" \
+        $EXTRA_MOUNT_FLAGS \
+        -v "$CACHE_DIR/pip:/cache/pip:rw" \
+        -v "$CACHE_DIR/npm:/cache/npm:rw" \
+        -v "$CONFIG_DIR:/home/claude:rw" \
+        -e PIP_CACHE_DIR=/cache/pip \
+        -e NPM_CONFIG_CACHE=/cache/npm \
+        -e GIT_AUTHOR_NAME="$GIT_NAME" \
+        -e GIT_AUTHOR_EMAIL="$GIT_EMAIL" \
+        -e GIT_COMMITTER_NAME="$GIT_NAME" \
+        -e GIT_COMMITTER_EMAIL="$GIT_EMAIL" \
+        -w "$CONTAINER_PATH" \
+        claude-code-sandbox \
+        "${CONTAINER_CMD[@]}"
+}
+
+if [ -n "$STREAM_CAPTURE_FILE" ]; then
+    # Headless: tee stdout, capturing only the result line and file-modifying tool calls
+    _run_docker | tee >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+    DOCKER_EXIT_CODE=${PIPESTATUS[0]}
+    # Wait for process substitution to finish writing
+    sleep 0.2
+else
+    _run_docker
+    DOCKER_EXIT_CODE=$?
+fi
+
+# Record end time
+FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Write status files for headless/programmatic use
+if [ "$HEADLESS_MODE" = true ]; then
+    echo "$DOCKER_EXIT_CODE" > "$PROJECT_DIR/.sandbox-exit-code"
+
+    # Build .sandbox-status.json by merging script-known fields with parsed stream-json
+    # Uses python3 to parse the result line and extract file paths from tool_use events
+    _build_status_json() {
+        local capture_file="$1"
+
+        python3 -c "
+import json, sys
+
+# Script-known fields passed as arguments
+script_data = {
+    'container_name': sys.argv[1],
+    'started_at': sys.argv[2],
+    'finished_at': sys.argv[3],
+    'exit_code': int(sys.argv[4]),
+    'command': sys.argv[5].split('\x1f') if sys.argv[5] else [],
+    'project_dir': sys.argv[6],
+    'container_path': sys.argv[7],
+    'resource_limits': {
+        'preset': sys.argv[8] or None,
+        'memory': sys.argv[9] or None,
+        'cpus': sys.argv[10] or None,
+        'pids': sys.argv[11] or None,
+    },
+    'headless': True,
+}
+
+# Read captured lines (result event + Write/Edit tool_use events)
+capture_file = sys.argv[12] if len(sys.argv) > 12 else ''
+lines = []
+if capture_file:
+    try:
+        with open(capture_file) as f:
+            lines = f.readlines()
+    except (IOError, OSError):
+        pass
+
+# Parse the result line
+parsed = {}
+for line in lines:
+    try:
+        obj = json.loads(line)
+        if obj.get('type') == 'result':
+            parsed = obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+# Extract file paths from Write/Edit tool_use events
+files_changed = set()
+for line in lines:
+    try:
+        obj = json.loads(line)
+        if obj.get('type') != 'assistant':
+            continue
+        for block in obj.get('message', {}).get('content', []):
+            if block.get('type') == 'tool_use' and block.get('name') in ('Write', 'Edit'):
+                fp = block.get('input', {}).get('file_path')
+                if fp:
+                    files_changed.add(fp)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+# Merge all fields
+status = {
+    'container_name': script_data['container_name'],
+    'session_id': parsed.get('session_id'),
+    'started_at': script_data['started_at'],
+    'finished_at': script_data['finished_at'],
+    'exit_code': script_data['exit_code'],
+    'duration_ms': parsed.get('duration_ms'),
+    'num_turns': parsed.get('num_turns'),
+    'cost_usd': parsed.get('total_cost_usd'),
+    'result_text': parsed.get('result'),
+    'files_changed': sorted(files_changed) if files_changed else None,
+    'command': script_data['command'],
+    'project_dir': script_data['project_dir'],
+    'container_path': script_data['container_path'],
+    'resource_limits': script_data['resource_limits'],
+    'headless': True,
+    'error': parsed.get('result', '') if parsed.get('is_error') else '',
+}
+
+json.dump(status, sys.stdout, indent=2)
+print()
+" \
+            "$CONTAINER_NAME" \
+            "$STARTED_AT" \
+            "$FINISHED_AT" \
+            "$DOCKER_EXIT_CODE" \
+            "$(IFS=$'\x1f'; echo "${CONTAINER_CMD[*]}")" \
+            "$PROJECT_DIR" \
+            "$CONTAINER_PATH" \
+            "$PRESET" \
+            "$MEMORY_LIMIT" \
+            "$CPU_LIMIT" \
+            "$PIDS_LIMIT" \
+            "$STREAM_CAPTURE_FILE"
+    }
+
+    # Determine status file path: --status-file overrides, otherwise default to project dir
+    _STATUS_OUTPUT="${STATUS_FILE:-$PROJECT_DIR/.sandbox-status.json}"
+
+    if command -v python3 &>/dev/null; then
+        _build_status_json > "$_STATUS_OUTPUT" 2>/dev/null
+    fi
+
+    # Clean up temp file
+    [ -f "$STREAM_CAPTURE_FILE" ] && rm -f "$STREAM_CAPTURE_FILE"
+fi
 
 # Stop monitoring if it was running
 if [ -n "$MONITOR_PID" ]; then
@@ -963,8 +1192,10 @@ if [ -n "$MONITOR_PID" ]; then
     wait $MONITOR_PID 2>/dev/null
 fi
 
-echo ""
-echo "================================================================"
+if [ "$HEADLESS_MODE" != true ]; then
+    echo ""
+    echo "================================================================"
+fi
 
 if [ $DOCKER_EXIT_CODE -ne 0 ] && [ $DOCKER_EXIT_CODE -ne 130 ]; then
     # Non-zero exit that's not Ctrl+C (130)
@@ -1029,9 +1260,11 @@ if [ $DOCKER_EXIT_CODE -ne 0 ] && [ $DOCKER_EXIT_CODE -ne 130 ]; then
     exit $DOCKER_EXIT_CODE
 fi
 
-echo "Claude Code session ended."
-echo "Docker container '$CONTAINER_NAME' removed."
-echo ""
+if [ "$HEADLESS_MODE" != true ]; then
+    echo "${PROCESS_LABEL} session ended."
+    echo "Docker container '$CONTAINER_NAME' removed."
+    echo ""
+fi
 
 # Show monitoring summary if it was enabled
 if [ "$ENABLE_MONITORING" = true ] && [ -f "$STATS_LOG" ]; then
@@ -1059,6 +1292,8 @@ if [ "$ENABLE_MONITORING" = true ] && [ -f "$STATS_LOG" ]; then
     echo ""
 fi
 
-echo "Your project files are preserved at:"
-echo "  $PROJECT_DIR"
-echo "================================================================"
+if [ "$HEADLESS_MODE" != true ]; then
+    echo "Your project files are preserved at:"
+    echo "  $PROJECT_DIR"
+    echo "================================================================"
+fi

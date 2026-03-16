@@ -16,6 +16,8 @@
 6. [Advanced Configuration](#advanced-configuration)
    - [Extra Mounts](#extra-mounts)
    - [Host Network Access](#host-network-access)
+   - [Headless / Programmatic Mode](#headless--programmatic-mode) *(see [HEADLESS.md](HEADLESS.md) for full reference)*
+   - [Custom Commands](#custom-commands)
 
 ---
 
@@ -55,6 +57,8 @@ You'll see:
 Claude Code session ended.
 Docker container removed.
 ```
+
+**Headless mode exit:** See [HEADLESS.md](HEADLESS.md) for details on status files and exit codes.
 
 **Force stop (if terminal is frozen):**
 
@@ -706,6 +710,15 @@ The `run-claude-sandboxed.sh` script supports various flags for customization:
 ./run-claude-sandboxed.sh --preset heavy --monitor --port 3380
 ```
 
+**Headless / Programmatic:**
+
+```bash
+./run-claude-sandboxed.sh --headless ~/myproject
+./run-claude-sandboxed.sh --headless ~/myproject -- python3 script.py
+```
+
+> **📖 See:** [HEADLESS.md](HEADLESS.md) for the full automation guide — status files, multi-instance naming, stream-json parsing, integration patterns, and more.
+
 **Other Options:**
 
 ```bash
@@ -832,6 +845,30 @@ Adds `--add-host=host.docker.internal:host-gateway` to the Docker run command, w
 - Local development with databases (PostgreSQL, MySQL, Redis)
 - Connecting to local API servers during development
 - Integration testing with host services
+
+### Headless / Programmatic Mode
+
+The `--headless` flag runs the sandbox without interactive prompts, TTY allocation, or UX banners. Designed for scripting, CI pipelines, and dispatchers.
+
+```bash
+./run-claude-sandboxed.sh --headless ~/myproject
+```
+
+> **📖 Full reference:** [HEADLESS.md](HEADLESS.md) — status files, JSON schema, multi-instance naming, stream-json parsing, integration patterns, safety rules, and caveats.
+
+### Custom Commands
+
+Use `--` to run a different command inside the sandbox instead of `claude`:
+
+```bash
+./run-claude-sandboxed.sh ~/myproject -- python3 my_script.py
+./run-claude-sandboxed.sh ~/myproject -- bash
+./run-claude-sandboxed.sh --headless ~/myproject -- python3 analyze.py
+```
+
+All sandbox features (volumes, user mapping, resource limits, extra mounts) apply unchanged. Version checks are automatically skipped for non-Claude commands.
+
+> **📖 See also:** [HEADLESS.md - Custom Commands](HEADLESS.md#custom-commands) for headless-specific details.
 
 ### Updating Claude Code
 

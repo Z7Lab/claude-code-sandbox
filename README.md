@@ -16,6 +16,8 @@ Wraps the **official Claude Code** (always pulling the latest npm release) in Do
 - ✅ **Persistent auth** - Login once, relaunches keep you signed in
 - ✅ **Flexible authentication** - Use your Claude subscription (Pro/Team) or Anthropic API account
 - ✅ **Extra mounts** - Mount additional host directories (downloads, datasets, logs) into the container
+- ✅ **Headless mode** - Programmatic `--headless` flag for scripting and automation (no TTY, no prompts)
+- ✅ **Custom commands** - Run any command inside the sandbox with `-- <command>` (e.g., `-- python3 script.py`)
 
 ## 🛡️ Why Docker Isolation?
 
@@ -451,12 +453,38 @@ To skip the automatic update check (for CI/scripts), use:
 run-claude-sandboxed.sh --skip-update-check
 ```
 
+> **💡 Tip:** The `--headless` flag automatically implies `--skip-update-check`.
+
+**Q: Can I use the sandbox programmatically (headless, no interactive prompts)?**
+
+Yes! Use `--headless` for scripting, CI, or automation:
+
+```bash
+run-claude-sandboxed.sh --headless ~/myproject
+cat ~/myproject/.sandbox-exit-code       # exit code
+cat ~/myproject/.sandbox-status.json     # structured JSON result
+```
+
+> **📖 See:** [HEADLESS.md](HEADLESS.md) for the full automation guide — status file schema, multi-instance naming, integration patterns, and more.
+
+**Q: Can I run a different command inside the sandbox instead of Claude Code?**
+
+Yes! Use `--` followed by your command. All sandbox features (volumes, user mapping, resource limits) apply unchanged:
+
+```bash
+run-claude-sandboxed.sh ~/myproject -- python3 my_script.py
+run-claude-sandboxed.sh --headless ~/myproject -- python3 analyze.py
+```
+
+> **📖 See:** [HEADLESS.md - Custom Commands](HEADLESS.md#custom-commands) for details.
+
 ---
 
 ## 📚 Documentation
 
 - **[GUIDE.md](GUIDE.md)** - Advanced usage, troubleshooting, and configuration
 - **[GUIDE.md - Extra Mounts](GUIDE.md#extra-mounts)** - Mount additional directories (downloads, datasets, logs) into the container
+- **[HEADLESS.md](HEADLESS.md)** - Headless mode, automation, status files, multi-instance, and integration patterns
 - **[SECURITY.md](SECURITY.md)** - Complete security architecture and isolation
 
 ---
