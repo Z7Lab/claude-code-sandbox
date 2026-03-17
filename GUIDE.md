@@ -18,6 +18,7 @@
    - [Host Network Access](#host-network-access)
    - [Headless / Programmatic Mode](#headless--programmatic-mode) *(see [HEADLESS.md](HEADLESS.md) for full reference)*
    - [Custom Commands](#custom-commands)
+   - [Base Images](#base-images)
 
 ---
 
@@ -869,6 +870,33 @@ Use `--` to run a different command inside the sandbox instead of `claude`:
 All sandbox features (volumes, user mapping, resource limits, extra mounts) apply unchanged. Version checks are automatically skipped for non-Claude commands.
 
 > **📖 See also:** [HEADLESS.md - Custom Commands](HEADLESS.md#custom-commands) for headless-specific details.
+
+### Base Images
+
+The sandbox supports multiple base images via the `--image` flag. Different base images provide different language runtimes and tools — pick one that matches your project's needs.
+
+```bash
+./run-claude-sandboxed.sh --image python3.13 ~/myproject   # Python 3.13 base
+./run-claude-sandboxed.sh --image bookworm ~/myproject      # Default (Node 20 + Debian 12)
+./run-claude-sandboxed.sh --image node22 ~/myproject        # Node 22
+```
+
+Images are built automatically on first use and cached. Subsequent runs with the same `--image` start instantly.
+
+**Available images** (from `images.conf.example`):
+
+| Name | Base Image | Notes |
+|------|-----------|-------|
+| `bookworm` | `node:20-bookworm` | **Default.** Debian 12, Python 3.11 |
+| `bullseye` | `node:20-bullseye` | Debian 11, Python 3.9 (legacy) |
+| `node22` | `node:22-bookworm` | Latest Node LTS |
+| `python3.11` | `python:3.11-bookworm` | Node installed by Dockerfile |
+| `python3.12` | `python:3.12-bookworm` | Node installed by Dockerfile |
+| `python3.13` | `python:3.13-bookworm` | Node installed by Dockerfile |
+
+**Changing the default:** Copy `images.conf.example` to `images.conf` and edit the `default=` line. You can also add custom entries.
+
+**Why this matters:** If your project has Python virtual environments (`.venv/`) or MCP servers that depend on a specific Python version, the container's Python must match the version the venv was created with. Use `--image python3.13` if your host has Python 3.13.
 
 ### Updating Claude Code
 

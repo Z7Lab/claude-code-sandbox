@@ -18,6 +18,7 @@ Wraps the **official Claude Code** (always pulling the latest npm release) in Do
 - ✅ **Extra mounts** - Mount additional host directories (downloads, datasets, logs) into the container
 - ✅ **Headless mode** - Programmatic `--headless` flag for scripting and automation (no TTY, no prompts)
 - ✅ **Custom commands** - Run any command inside the sandbox with `-- <command>` (e.g., `-- python3 script.py`)
+- ✅ **Configurable base image** - Switch between Node, Python, or GPU base images with `--image`
 
 ## 🛡️ Why Docker Isolation?
 
@@ -477,6 +478,19 @@ run-claude-sandboxed.sh --headless ~/myproject -- python3 analyze.py
 ```
 
 > **📖 See:** [HEADLESS.md - Custom Commands](HEADLESS.md#custom-commands) for details.
+
+**Q: Can I use a different base image (e.g., for a specific Python version)?**
+
+Yes! Use `--image` to pick a base image. Available images are defined in `images.conf`:
+
+```bash
+run-claude-sandboxed.sh --image python3.13 ~/myproject   # Python 3.13 base
+run-claude-sandboxed.sh --image bookworm ~/myproject      # Default (Node 20 + Debian 12)
+```
+
+The image is built automatically on first use and cached for future runs. Copy `images.conf.example` to `images.conf` to customize the default or add new base images.
+
+> **📖 See:** [GUIDE.md - Base Images](GUIDE.md#base-images) for the full list and how to add custom images.
 
 ---
 

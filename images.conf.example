@@ -1,0 +1,42 @@
+# Base Image Configuration — Claude Code Sandbox
+#
+# Controls which Docker base image the sandbox is built from.
+# Different base images provide different language runtimes, tools,
+# and library versions. Pick one that matches your project's needs.
+#
+# To use: copy this file to images.conf and edit.
+#   cp images.conf.example images.conf
+#
+# The "default" line sets the image used when no --image flag is passed.
+# Each other line maps a short name to a Docker base image.
+#
+# Usage:
+#   ./run-claude-sandboxed.sh ~/myproject                  # uses default
+#   ./run-claude-sandboxed.sh --image python3.13 ~/myproject
+#   ./run-claude-sandboxed.sh --image ml ~/myproject
+#
+# Changes take effect on next build. If an image hasn't been built yet,
+# the script builds it automatically on first use.
+#
+# Format: name=docker_base_image
+#
+# ── Default ──────────────────────────────────────────────
+#
+# Used when no --image flag is passed
+default=bookworm
+
+# ── Available Images ─────────────────────────────────────
+#
+# Node-based (Node.js pre-installed, Python added by Dockerfile):
+bookworm=node:20-bookworm
+bullseye=node:20-bullseye
+node22=node:22-bookworm
+
+# Python-based (Python pre-installed, Node.js added by Dockerfile):
+python3.11=python:3.11-bookworm
+python3.12=python:3.12-bookworm
+python3.13=python:3.13-bookworm
+
+# GPU / ML (CUDA pre-installed, Node.js + Python added by Dockerfile):
+# Requires --gpu flag and nvidia-docker runtime
+# ml=nvidia/cuda:12.4.0-devel-ubuntu22.04

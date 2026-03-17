@@ -7,6 +7,7 @@ CACHE_DIR="$SANDBOX_DIR/cache"
 CONFIG_DIR="$CACHE_DIR/claude-config"
 RESOURCES_DIR="$CONFIG_DIR/resources"
 EXTRA_MOUNTS_CONF="$SANDBOX_DIR/mounts.conf"
+IMAGES_CONF="$SANDBOX_DIR/images.conf"
 
 # Resource preset definitions
 declare -A PRESET_MEMORY=(
@@ -58,6 +59,7 @@ HEADLESS_MODE=false  # Headless mode for programmatic/dispatcher use
 CUSTOM_CMD=()  # Custom command to run instead of 'claude' (everything after --)
 STATUS_FILE=""  # Custom path for .sandbox-status.json (for orchestrators with concurrent jobs)
 LOG_FILE=""  # Custom path for full stream-json log (headless only)
+IMAGE_NAME=""  # Base image short name (from images.conf)
 
 # Function to find an available port
 find_available_port() {
@@ -216,6 +218,15 @@ while [[ $# -gt 0 ]]; do
             LOG_FILE="$2"
             shift 2
             ;;
+        --image)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ ERROR: --image requires a name argument (e.g., bookworm, python3.13)"
+                echo "   See images.conf.example for available options"
+                exit 1
+            fi
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
         --)
             shift
             CUSTOM_CMD=("$@")
@@ -284,6 +295,70 @@ fi
 if [ -n "$LOG_FILE" ] && [ "$HEADLESS_MODE" != true ]; then
     echo "⚠️  Warning: --log-file is only used in --headless mode. Ignoring."
     LOG_FILE=""
+fi
+
+# ── Base Image Resolution ────────────────────────────────
+# Reads images.conf (or images.conf.example as fallback) to resolve
+# the --image flag (or default) to a Docker base image and tag.
+_resolve_image() {
+    local conf=""
+    if [ -f "$IMAGES_CONF" ]; then
+        conf="$IMAGES_CONF"
+    elif [ -f "$SANDBOX_DIR/images.conf.example" ]; then
+        conf="$SANDBOX_DIR/images.conf.example"
+    fi
+
+    # If no --image flag, find the default from config
+    if [ -z "$IMAGE_NAME" ]; then
+        if [ -n "$conf" ]; then
+            IMAGE_NAME=$(grep -E '^default=' "$conf" | head -1 | cut -d= -f2 | xargs)
+        fi
+        IMAGE_NAME="${IMAGE_NAME:-bookworm}"
+    fi
+
+    # Look up the base image for this name
+    local base_image=""
+    if [ -n "$conf" ]; then
+        base_image=$(grep -E "^${IMAGE_NAME}=" "$conf" | head -1 | cut -d= -f2 | xargs)
+    fi
+
+    if [ -z "$base_image" ]; then
+        echo "❌ ERROR: Unknown image name '$IMAGE_NAME'"
+        echo ""
+        if [ -n "$conf" ]; then
+            echo "Available images (from $(basename "$conf")):"
+            grep -E '^[a-zA-Z].*=' "$conf" | grep -v '^default=' | while IFS='=' read -r name image; do
+                echo "   $name → $image"
+            done
+        else
+            echo "No images.conf found. Copy images.conf.example to images.conf."
+        fi
+        exit 1
+    fi
+
+    DOCKER_BASE_IMAGE="$base_image"
+    DOCKER_IMAGE_TAG="claude-code-sandbox:${IMAGE_NAME}"
+}
+
+_resolve_image
+
+# Build the image if it doesn't exist yet
+if ! docker image inspect "$DOCKER_IMAGE_TAG" >/dev/null 2>&1; then
+    echo "================================================================"
+    echo "🔨 Building sandbox image: $DOCKER_IMAGE_TAG"
+    echo "   Base: $DOCKER_BASE_IMAGE"
+    echo "================================================================"
+    echo ""
+
+    if ! docker build --build-arg "BASE_IMAGE=$DOCKER_BASE_IMAGE" \
+            -t "$DOCKER_IMAGE_TAG" "$SANDBOX_DIR"; then
+        echo ""
+        echo "❌ Image build failed."
+        exit 1
+    fi
+    echo ""
+    echo "✅ Image built: $DOCKER_IMAGE_TAG"
+    echo ""
 fi
 
 # Create cache directories if they don't exist
@@ -473,7 +548,7 @@ fi
 # Get installed version from Docker image (only when running default claude command)
 INSTALLED_VERSION=""
 if [ ${#CUSTOM_CMD[@]} -eq 0 ]; then
-    INSTALLED_VERSION=$(docker run --rm --entrypoint sh claude-code-sandbox -c "claude --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" 2>/dev/null)
+    INSTALLED_VERSION=$(docker run --rm --entrypoint sh "$DOCKER_IMAGE_TAG" -c "claude --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" 2>/dev/null)
 fi
 
 # Initialize version check status
@@ -577,7 +652,7 @@ if [ "$SKIP_UPDATE_CHECK" = false ]; then
             echo "This may take 2-5 minutes..."
             echo ""
 
-            if docker build --no-cache -t claude-code-sandbox "$SANDBOX_DIR"; then
+            if docker build --no-cache --build-arg "BASE_IMAGE=$DOCKER_BASE_IMAGE" -t "$DOCKER_IMAGE_TAG" "$SANDBOX_DIR"; then
                 echo ""
                 echo "✅ Update complete!"
                 echo ""
@@ -1070,7 +1145,7 @@ _run_docker() {
         -e GIT_COMMITTER_NAME="$GIT_NAME" \
         -e GIT_COMMITTER_EMAIL="$GIT_EMAIL" \
         -w "$CONTAINER_PATH" \
-        claude-code-sandbox \
+        "$DOCKER_IMAGE_TAG" \
         "${CONTAINER_CMD[@]}"
 }
 

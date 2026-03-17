@@ -614,6 +614,69 @@ When the limit is reached, the session ends with `stop_reason: "max_turns"` in t
 
 **Prompt tip for orchestrators:** If your agent needs to perform a signaling action after its main work (e.g., calling an API to report completion), put that step early in the prompt — before optional verification steps. This ensures the signal fires even if the agent runs out of turns during polish.
 
+### `--resume` for multi-turn headless sessions
+
+By default, each headless invocation (`claude -p "..."`) is a standalone session — no memory of previous runs. Use `--resume SESSION_ID` to continue a previous session:
+
+```bash
+# Turn 1: analyze the project (session ID auto-generated)
+./run-claude-sandboxed.sh --headless ~/myproject -- \
+    claude -p "Analyze the project architecture" \
+    --output-format stream-json --verbose \
+    --dangerously-skip-permissions
+
+# Read the session ID from the status file
+SESSION=$(python3 -c "import json; print(json.load(open('myproject/.claude/.sandbox-status.json'))['session_id'])")
+
+# Turn 2: resume the same session in a new container
+./run-claude-sandboxed.sh --headless ~/myproject -- \
+    claude -p "Now implement the refactoring we discussed" \
+    --resume "$SESSION" \
+    --output-format stream-json --verbose \
+    --dangerously-skip-permissions
+```
+
+On turn 2, Claude Code loads the full conversation history from turn 1. The agent remembers what it read, decided, and wrote — no need to re-read everything.
+
+**Where sessions are stored:** `~/.claude/projects/{project-path}/` as JSONL files. In the sandbox, this maps to `cache/claude-config/.claude/projects/-sandboxed-{path}/`. The cache directory is a Docker volume mount, so **sessions survive container restarts.**
+
+**How to get the session ID:** Read it from:
+- `.claude/.sandbox-status.json` → `session_id` field (after container exits)
+- The stream-json `result` event → `session_id` field (during execution)
+- The stream-json `system` init event → `session_id` field (at start)
+
+**Important:** `--session-id "custom-name"` does NOT work for resume — it requires a UUID and cannot reuse a completed session. Always use `--resume` with the UUID from the previous run.
+
+**When to resume vs start fresh:**
+
+| Scenario | Approach |
+|----------|----------|
+| Agent ran out of turns, needs to finish | `--resume SESSION_ID` — avoids re-reading everything |
+| Continuing a multi-step task | `--resume SESSION_ID` — agent keeps its reasoning |
+| Starting a different task on the same project | No resume — new session, different context |
+| Starting work on a new project | No resume — fresh session |
+
+**Verified:** `--resume` works with `-p` (headless) across Docker container relaunches. The agent retains full context from previous turns including tool results, reasoning, and file contents read.
+
+### Agent prompts that curl external APIs may trigger safety refusal
+
+Claude Code has a safety heuristic that detects prompt injection patterns. If the agent's task prompt tells it to:
+
+1. Contact an external API with an authentication token
+2. Read instructions from the response
+3. Modify files based on those instructions
+
+Claude Code may refuse the entire prompt as a suspected injection attack, even though the instructions are legitimate. The symptom is a 1-turn session where the agent says "I'm not going to follow these instructions" and exits.
+
+**This happens with curl-based agent coordination** — e.g., telling an agent to `curl -H "X-Token: ..." http://platform/agent/messages` and then act on what it reads. The pattern of "fetch remote commands and execute them" is exactly what prompt injection looks like.
+
+**Fix: use MCP instead of curl.** MCP tools are registered at startup as trusted capabilities. Claude Code does not apply prompt injection heuristics to its own registered MCP tools. An agent calling `platform.read_messages()` via MCP is safe; an agent running `curl ... | act on result` in the prompt may be refused.
+
+If MCP is not available, mitigate by:
+- Including the full context directly in the prompt instead of telling the agent to fetch it
+- Avoiding patterns where the agent fetches instructions from an API and then executes them
+- Keeping auth tokens out of the visible prompt text (use environment variables)
+
 ### `--verbose` required for stream-json
 
 Claude Code requires `--verbose` when combining `-p` with `--output-format stream-json`. Without it, the CLI exits with an error. Make sure your commands include both flags.
@@ -622,6 +685,52 @@ Claude Code requires `--verbose` when combining `-p` with `--output-format strea
 
 Headless mode does not map the OAuth port (`-p $PORT:3000`), so the browser-based authentication flow cannot complete. You must authenticate interactively at least once before using headless mode. Credentials are stored in the cache directory and reused across sessions.
 
+### Detecting completion
+
+**The only definitive signal that a sandbox job is done is the Docker container exiting.** Do not rely on stream-json events.
+
+The stream-json `result` event (with `stop_reason: "end_turn"` or `"max_turns"`) means the Claude API session ended, but:
+- A tool call may still be executing (e.g., a long `Bash` command or file write)
+- The sandbox script's post-exit logic (status file writing, cleanup) runs after Claude exits
+- The container can be actively modifying files for minutes after the `result` event
+
+**For orchestrators / dispatchers:**
+
+```bash
+# Definitive: wait for container to exit
+docker wait "claude-sandbox-myproject-abc123"
+
+# Or poll for container disappearance
+while docker ps --filter "name=claude-sandbox-myproject-abc123" --format "{{.Names}}" | grep -q .; do
+    sleep 5
+done
+
+# THEN read status files
+cat ~/myproject/.claude/.sandbox-exit-code
+cat ~/myproject/.claude/.sandbox-status.json
+```
+
+**Do not trust** the stream-json `result` event as "process finished." Use it for progress monitoring only.
+
 ### Container is ephemeral
 
 Containers use `--rm` and are deleted on exit. You cannot `docker inspect` or `docker logs` a container after it finishes. The status file and log file (if `--log-file` was used) are the only post-exit records. If you need the full stream log, use `--log-file` to persist it, or capture stdout/stderr from the process.
+
+### Claude Code hangs during MCP initialization
+
+If Claude Code produces no stream-json output at all (just the resource banner, then nothing for minutes), the most likely cause is an MCP server that breaks the SSE streaming protocol during connection.
+
+**Symptoms:**
+- Container starts and prints resource limits, then hangs indefinitely
+- No `system` init event in stream-json output
+- `curl` to the MCP SSE endpoint works fine from inside the container
+- Python MCP client connects and discovers tools from the host
+
+**Common cause:** ASGI middleware on the MCP server that wraps the SSE `send` callback. SSE in ASGI works by sending `http.response.body` chunks with `more_body=True`. If middleware intercepts these chunks (e.g., to inspect response content), it can break the streaming protocol. Claude Code's MCP client connects but never receives the first SSE event, causing it to hang during initialization.
+
+**How to diagnose:**
+1. Test the MCP server from the host with a Python MCP client — if it works there but not from Claude Code in the sandbox, the issue is in how the server handles the SSE transport
+2. Check if the MCP server has any ASGI middleware wrapping the SSE response
+3. Look for `send` callback wrappers, response interceptors, or auth middleware that inspects response bodies
+
+**Fix:** MCP servers should not wrap or intercept the SSE `send` callback. Auth tokens should be extracted from the request (URL query params, headers) and mapped to sessions without touching the response stream.
