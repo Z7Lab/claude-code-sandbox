@@ -56,9 +56,11 @@ PORT_AUTO=true
 INSTANCE_NAME=""  # Optional: user-provided instance name
 CLI_MOUNTS=()  # Extra mounts from --mount flags
 HEADLESS_MODE=false  # Headless mode for programmatic/dispatcher use
+INTERACTIVE_PTY=false  # PTY mode for live terminal observation (no stream-json)
 CUSTOM_CMD=()  # Custom command to run instead of 'claude' (everything after --)
 STATUS_FILE=""  # Custom path for .sandbox-status.json (for orchestrators with concurrent jobs)
 LOG_FILE=""  # Custom path for full stream-json log (headless only)
+DOCKER_NETWORK=""  # Optional: attach container to a pre-created Docker network
 IMAGE_NAME=""  # Base image short name (from images.conf)
 
 # Function to find an available port
@@ -202,12 +204,33 @@ while [[ $# -gt 0 ]]; do
             SKIP_RESOURCE_PROMPTS=true
             shift
             ;;
+        --interactive-pty)
+            # PTY mode: allocates a real TTY so the Claude TUI renders
+            # correctly for live observation by the parent process. Implies
+            # --headless (no console banners, no resource prompts) and
+            # disables stream-json capture (stdout is raw terminal output).
+            INTERACTIVE_PTY=true
+            HEADLESS_MODE=true
+            SKIP_UPDATE_CHECK=true
+            SKIP_RESOURCE_PROMPTS=true
+            shift
+            ;;
         --status-file)
             if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then
                 echo "❌ ERROR: --status-file requires a path argument"
                 exit 1
             fi
             STATUS_FILE="$2"
+            shift 2
+            ;;
+        --docker-network)
+            # Attach the container to a pre-created Docker network for sandbox
+            # isolation or controlled internet access (e.g. --internal networks).
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ ERROR: --docker-network requires a network name argument"
+                exit 1
+            fi
+            DOCKER_NETWORK="$2"
             shift 2
             ;;
         --log-file)
@@ -466,9 +489,15 @@ if [ -n "$PRESET" ]; then
     GPU_ENABLED="${PRESET_GPU[$PRESET]}"
 fi
 
-# Get git config with fallbacks
-GIT_NAME=$(git config --global user.name 2>/dev/null || echo "Claude User")
-GIT_EMAIL=$(git config --global user.email 2>/dev/null || echo "claude@local")
+# Resolve git identity for the sandbox in this order:
+#   1. GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL env vars from the caller (dispatcher
+#      passes these when projects.yaml has commit_author for the project)
+#   2. host git config --global
+#   3. hardcoded placeholder
+# Honoring caller-set env vars lets per-project identity flow through without
+# depending on the launching container having a global gitconfig.
+GIT_NAME="${GIT_AUTHOR_NAME:-$(git config --global user.name 2>/dev/null || echo "Claude User")}"
+GIT_EMAIL="${GIT_AUTHOR_EMAIL:-$(git config --global user.email 2>/dev/null || echo "claude@local")}"
 
 # Auto-select port if not specified (skip in headless — port is never mapped)
 if [ "$HEADLESS_MODE" != true ]; then
@@ -528,10 +557,15 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     fi
 fi
 
-# Ensure .claude.json exists as a FILE (not directory)
-if [ ! -f "$CONFIG_DIR/.claude.json" ]; then
-    rm -rf "$CONFIG_DIR/.claude.json"
-    echo '{}' > "$CONFIG_DIR/.claude.json"
+# Ensure .claude.json exists inside .claude/ directory (not as a separate file).
+# Stored inside .claude/ so we only need one directory mount, avoiding Docker
+# EBUSY errors that occur when bind-mounting individual files.
+# Migrate from old location if needed.
+if [ -f "$CONFIG_DIR/.claude.json" ] && [ ! -L "$CONFIG_DIR/.claude.json" ]; then
+    mv "$CONFIG_DIR/.claude.json" "$CONFIG_DIR/.claude/.claude.json"
+fi
+if [ ! -f "$CONFIG_DIR/.claude/.claude.json" ]; then
+    echo '{}' > "$CONFIG_DIR/.claude/.claude.json"
 fi
 
 # Check if this is first run (no credentials) - do this early to customize header
@@ -557,20 +591,21 @@ LATEST_VERSION=""
 
 # Version check and update prompt (unless --skip-update-check flag is set)
 if [ "$SKIP_UPDATE_CHECK" = false ]; then
-    # Get latest version from npm registry (with timeout)
-    # Try multiple methods in order: curl, wget, npm
+    # Get latest version from the official release endpoint (with timeout)
+    # Derive the releases URL dynamically from the installer redirect,
+    # so it stays correct if Anthropic changes the backend bucket.
+    CLAUDE_RELEASES_URL=$(timeout 5 curl -sI -o /dev/null -w "%{redirect_url}" https://claude.ai/install.sh 2>/dev/null | sed 's|/bootstrap\.sh$||')
 
-    # Method 1: curl
-    LATEST_VERSION=$(timeout 5 curl -s --max-time 5 https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -o '"version":"[^"]*' | cut -d'"' -f4)
-
-    # Method 2: wget (if curl failed)
-    if [ -z "$LATEST_VERSION" ]; then
-        LATEST_VERSION=$(timeout 5 wget -qO- --timeout=5 https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -o '"version":"[^"]*' | cut -d'"' -f4)
+    if [ -n "$CLAUDE_RELEASES_URL" ]; then
+        LATEST_VERSION=$(timeout 5 curl -s --max-time 5 "$CLAUDE_RELEASES_URL/latest" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     fi
 
-    # Method 3: npm (if both curl and wget failed)
+    # Fallback: wget (if curl failed)
     if [ -z "$LATEST_VERSION" ]; then
-        LATEST_VERSION=$(timeout 5 npm view @anthropic-ai/claude-code version 2>/dev/null)
+        LATEST_VERSION=$(timeout 5 wget -qO- --timeout=5 "https://claude.ai/install.sh" 2>/dev/null | grep -oE 'https://[^"]+/claude-code-releases' | head -1)
+        if [ -n "$LATEST_VERSION" ]; then
+            LATEST_VERSION=$(timeout 5 wget -qO- --timeout=5 "$LATEST_VERSION/latest" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        fi
     fi
 
     # Determine version check status
@@ -1093,7 +1128,12 @@ if [ "$ALLOW_HOST_SERVICES" = true ]; then
 fi
 
 # Build docker run flags based on mode
-if [ "$HEADLESS_MODE" = true ]; then
+# Interactive PTY mode needs both -i (keep stdin open) and -t (allocate a TTY)
+# so the Claude TUI inside the container renders correctly; the launcher
+# wires our pty slave fd to the container's stdio.
+if [ "$INTERACTIVE_PTY" = true ]; then
+    DOCKER_RUN_FLAGS="-it --rm"
+elif [ "$HEADLESS_MODE" = true ]; then
     DOCKER_RUN_FLAGS="-i --rm"
 else
     DOCKER_RUN_FLAGS="-it --rm"
@@ -1117,17 +1157,27 @@ STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # In headless mode, tee stdout to a temp file so we can parse status after exit.
 # We filter for only the lines we need: the result event and file-modifying tool calls.
+# Skip in --interactive-pty mode: stdout is raw terminal output (escape codes,
+# repainted frames), not stream-json, so filtering it would be meaningless.
 STREAM_CAPTURE_FILE=""
-if [ "$HEADLESS_MODE" = true ]; then
+if [ "$HEADLESS_MODE" = true ] && [ "$INTERACTIVE_PTY" != true ]; then
     STREAM_CAPTURE_FILE=$(mktemp /tmp/sandbox-stream-capture.XXXXXX)
 fi
 
 # Run Docker with host user UID/GID to prevent permission issues
 # Files created by the process will be owned by you, not root
 # Each project gets a unique container path for isolated permissions/sessions
+NETWORK_FLAG=""
+if [ -n "$DOCKER_NETWORK" ]; then
+    NETWORK_FLAG="--network=$DOCKER_NETWORK"
+fi
+
 _run_docker() {
     docker run $DOCKER_RUN_FLAGS \
         --name "$CONTAINER_NAME" \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        $NETWORK_FLAG \
         $RESOURCE_FLAGS \
         --user "$(id -u):$(id -g)" \
         -e HOME=/home/claude \
@@ -1137,7 +1187,7 @@ _run_docker() {
         $EXTRA_MOUNT_FLAGS \
         -v "$CACHE_DIR/pip:/cache/pip:rw" \
         -v "$CACHE_DIR/npm:/cache/npm:rw" \
-        -v "$CONFIG_DIR:/home/claude:rw" \
+        -v "$CONFIG_DIR/.claude:/home/claude/.claude:rw" \
         -e PIP_CACHE_DIR=/cache/pip \
         -e NPM_CONFIG_CACHE=/cache/npm \
         -e GIT_AUTHOR_NAME="$GIT_NAME" \
@@ -1152,10 +1202,10 @@ _run_docker() {
 if [ -n "$STREAM_CAPTURE_FILE" ]; then
     if [ -n "$LOG_FILE" ]; then
         # Headless with --log-file: tee to both the log file and the filtered capture file
-        _run_docker | tee "$LOG_FILE" >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+        _run_docker | tee "$LOG_FILE" >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"|"name":"write_to_file"|"name":"edit_file"' > "$STREAM_CAPTURE_FILE")
     else
         # Headless: tee stdout, capturing only the result line and file-modifying tool calls
-        _run_docker | tee >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"' > "$STREAM_CAPTURE_FILE")
+        _run_docker | tee >(grep -E '"type":"result"|"name":"Write"|"name":"Edit"|"name":"write_to_file"|"name":"edit_file"' > "$STREAM_CAPTURE_FILE")
     fi
     DOCKER_EXIT_CODE=${PIPESTATUS[0]}
     # Wait for process substitution to finish writing
@@ -1228,7 +1278,7 @@ for line in lines:
         if obj.get('type') != 'assistant':
             continue
         for block in obj.get('message', {}).get('content', []):
-            if block.get('type') == 'tool_use' and block.get('name') in ('Write', 'Edit'):
+            if block.get('type') == 'tool_use' and block.get('name') in ('Write', 'Edit', 'write_to_file', 'edit_file'):
                 fp = block.get('input', {}).get('file_path')
                 if fp:
                     files_changed.add(fp)

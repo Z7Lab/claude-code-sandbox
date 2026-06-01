@@ -6,9 +6,9 @@ Run official [Claude Code](https://docs.anthropic.com/docs/claude-code) safely i
 
 ## ✨ What This Does
 
-Wraps the **official Claude Code** (always pulling the latest npm release) in Docker to provide:
+Wraps the **official Claude Code** (always pulling the latest native release) in Docker to provide:
 
-- ✅ **Always up-to-date** - Uses latest official `@anthropic-ai/claude-code` from npm
+- ✅ **Always up-to-date** - Uses the official native installer from Anthropic
 - ✅ **Complete isolation** - Only your project directory is accessible
 - ✅ **Resource limits** - Per-project memory/CPU/GPU control with presets
 - ✅ **System protection** - No access to ~/.ssh, /etc/, or other projects, folders, or files on host system
@@ -64,8 +64,8 @@ cd ~/myproject
 > **⚡ Every run after:** Starts immediately with saved preferences
 
 > **📍 Storage location:**
-> Credentials are saved in `~/devtools/claude-code-sandbox/cache/claude-config/` (on your host, but outside your project directories).
-> This follows the same pattern as regular Claude Code if installed on the host (`~/.claude/`), just relocated for isolation.
+> Credentials are saved in `~/devtools/claude-code-sandbox/cache/claude-config/.claude/` (on your host, but outside your project directories).
+> This follows the same pattern as regular Claude Code (`~/.claude/`), just relocated for isolation.
 
 ### Optional: Add to PATH
 
@@ -303,20 +303,20 @@ This removes `~/devtools/claude-code-sandbox/cache/` which stores Claude Code's 
 
 **Q: Do I need to install Claude Code on my system for this to work?**
 
-No! The Docker sandbox includes Claude Code inside the container. You don't need to install anything else. When you run `run-claude-sandboxed.sh`, it starts Claude Code in an isolated Docker environment with everything pre-installed.
+No — the only thing you need on the host is **Docker**. Claude Code is downloaded directly from Anthropic's official installer *inside* the Docker image during `make build` (see [Dockerfile](Dockerfile)), so it lives in the image, not on your host. The same applies to Node.js, Python, `npm`, and `pip`: all of them exist inside the container and are never installed on your host by this project. When you run `run-claude-sandboxed.sh`, the container starts with everything already present.
 
 **Q: I already have Claude Code installed globally. Do I need to uninstall it?**
 
 No! The Docker sandbox runs completely independently from any global Claude Code installation. You can use both:
 
 - Regular Claude Code: Direct system access, config in `~/.claude/`
-- Docker sandbox: Isolated execution, config in `~/devtools/claude-code-sandbox/cache/claude-config/`
+- Docker sandbox: Isolated execution, config in `~/devtools/claude-code-sandbox/cache/claude-config/.claude/`
 
 They don't interfere with each other and maintain separate configurations.
 
 **Q: What happens to my settings and authentication between sessions?**
 
-Everything persists! The sandbox stores authentication, preferences, and per-project data (conversations, permissions, settings) in `~/devtools/claude-code-sandbox/cache/claude-config/` which is mounted into the container.
+Everything persists! The sandbox stores authentication, preferences, and per-project data (conversations, permissions, settings) in `~/devtools/claude-code-sandbox/cache/claude-config/.claude/` which is mounted into the container.
 
 > **📖 See:** [GUIDE.md - What Persists](GUIDE.md#what-persists) for details on what persists
 
@@ -426,25 +426,21 @@ make check-update
 # Update to latest version
 make update
 
-# Or rebuild manually
-docker build --no-cache -t claude-code-sandbox .
+# Or force rebuild
+make rebuild
 ```
 
 **Why can't Claude Code auto-update itself?**
 
-Claude Code normally auto-updates via `npm i -g @anthropic-ai/claude-code`, but this doesn't work in the sandbox because:
+Claude Code normally auto-updates via its native updater, but this doesn't work in the sandbox because:
 
 - The Docker container is **ephemeral** (deleted when it stops via `--rm` flag)
-- Updates to `/usr/local/lib/node_modules` inside the container are lost on restart
+- Updates to the binary inside the container are lost on restart
 - The sandbox uses **Docker best practices**: dependencies belong in the image, not the container
 
 **What if an update is released during my session?**
 
-If Claude Code detects a new version while you're working, you may see:
-
-```
-Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
-```
+If Claude Code detects a new version while you're working, you may see an auto-update warning.
 
 This is expected in the sandbox. Simply exit your session (Ctrl+C), and the script will detect the new version and prompt you to update when you restart.
 

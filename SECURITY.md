@@ -145,13 +145,78 @@ Some AI code editors use command deny lists (blocking `rm`, `sudo`, `git commit`
 
 ---
 
+## Honest Limits: What Containers Don't Isolate
+
+Docker containers are a strong boundary for most threats — but they aren't a VM, and it helps to know precisely where the boundary ends.
+
+### Shared kernel
+
+Every container on a host shares the host's Linux kernel. A kernel vulnerability that allows privilege escalation from inside a container is, by definition, a container escape. These are rare and patched quickly, but they exist — recent examples include the runc CVE-2024-21626 file descriptor leak (allowed writing to arbitrary host paths) and various overlayfs/cgroup CVEs. A VM-based sandbox would not be affected by kernel-level container CVEs because each VM runs its own kernel.
+
+**Practical implication:** keep your host kernel and Docker engine patched. A current Docker on a current kernel handles this fine.
+
+### Default capabilities are reduced, not empty
+
+Docker drops a long list of Linux capabilities by default (CAP_SYS_ADMIN, CAP_SYS_MODULE, etc.) but retains a small "safe" set such as `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETUID`, and `CAP_NET_BIND_SERVICE`. The sandbox passes `--cap-drop=ALL` and `--security-opt=no-new-privileges` by default, removing even those retained defaults. If a workload needs a specific capability back (e.g. `CAP_DAC_OVERRIDE` for certain package installs), add `--cap-add=<CAP>` to the `docker run` call in `run-claude-sandboxed.sh`.
+
+### No user namespace remapping
+
+The container runs as your host UID/GID, not as a remapped namespace user. This means a file written by the container as UID 1000 is owned by host UID 1000. If an attacker found a way out of the bind-mount boundary (e.g. through a symlink escape or a kernel bug), they would have your user's privileges on the host — not root, but still your files.
+
+### Privileged operations the container fundamentally can't do
+
+By design, the sandbox cannot:
+
+- Load kernel modules, run eBPF programs, or modify sysctls
+- Modify host iptables / nftables rules or open raw sockets
+- Mount filesystems
+- Run Docker-in-Docker or another container runtime (the docker socket is not mounted)
+- Run `systemd` as PID 1 (the container is a single-process environment)
+- Install and manage system services via `apt`/`systemctl`
+
+If your workload genuinely needs these operations, a container sandbox is the wrong tool — you'd want a microVM-based runtime (Firecracker, Kata, gVisor with VM mode) where the agent gets a real kernel.
+
+### Container engine and image risks
+
+- **Misconfiguration is the most common escape vector.** The sandbox script intentionally avoids `--privileged`, broad mounts, and the docker socket. If you fork or edit it, preserve those properties.
+- **Base image supply chain.** The container's base image (`node:*`, Python, Claude CLI install) is pulled from public registries. A compromised upstream image would land in the container. Rebuilding the image with `make build` periodically picks up patched bases.
+
+---
+
+## Hardening Further
+
+`--cap-drop=ALL` and `--security-opt=no-new-privileges` are already on by default. The next tier of hardening is a read-only root filesystem. It breaks some workloads (package installs that write outside mounted volumes) but eliminates a class of persistent-write attacks:
+
+```bash
+docker run \
+    # ... existing flags ...
+    --read-only \
+    --tmpfs /tmp:rw,size=512m \
+    --tmpfs /home/claude/.cache:rw,size=512m \
+    # ... rest of command
+```
+
+| Flag | What it does | Trade-off |
+|---|---|---|
+| `--cap-drop=ALL` | Removes all Linux capabilities, including the default-retained ones | **Default.** Add specific caps back with `--cap-add=<CAP>` if a workload needs them. |
+| `--security-opt=no-new-privileges` | Prevents `setuid` binaries inside the container from gaining new privileges | **Default.** No known trade-offs for this workload. |
+| `--read-only` | Mounts the container root filesystem read-only | Anything that writes outside mounted volumes will fail. You'll need `--tmpfs` for `/tmp` and any other path the runtime writes to. |
+| `--tmpfs /tmp:rw,size=512m` | Gives the container a writable in-memory `/tmp` | Bounded size; data lost on container exit (which is fine — it's `/tmp`). |
+| `--security-opt seccomp=/path/to/profile.json` | Pin a custom seccomp profile instead of Docker's default | Default is usually fine. Only worth doing if you have a specific threat model. |
+
+For untrusted code or multi-tenant scenarios, even these flags only narrow the kernel attack surface — they don't replace what a real VM gives you.
+
+---
+
 ## Data Persistence & Security
 
 Understanding where sensitive data is stored is crucial for the complete security model.
 
 ### Volume Mounts
 
-The sandbox uses **four separate volume mounts** for security and functionality:
+The sandbox uses **four separate volume mounts** for security and functionality.
+
+> **What a "mount" means here:** Each entry below is a Docker *bind mount* — a shared directory between host and container, not a copy. The container sees the host directory live; writes from either side are immediately visible to the other. Nothing is copied into or out of the image at runtime. Claude Code, Node.js, Python, `npm`, and `pip` all live *inside* the Docker image itself (installed at `make build` time) — none of them come from the host.
 
 **1. Project Directory** (Your Code)
 
@@ -177,8 +242,8 @@ Host:      ~/devtools/claude-code-sandbox/cache/npm
 Container: /cache/npm
 Purpose:   Node.js package cache
 
-Host:      ~/devtools/claude-code-sandbox/cache/claude-config
-Container: /home/claude
+Host:      ~/devtools/claude-code-sandbox/cache/claude-config/.claude
+Container: /home/claude/.claude
 Purpose:   Claude Code authentication, history, agents, preferences and settings
 ```
 
@@ -186,12 +251,15 @@ Purpose:   Claude Code authentication, history, agents, preferences and settings
 - Persists across container restarts
 - Cleared only with `--fresh` flag
 
+> **⚠️ These are NOT your host's pip/npm caches.**
+> Your host's real package caches live at the standard locations — typically `~/.cache/pip/` and `~/.npm/` — and are **never mounted into the container**. The sandbox uses its own, separate cache directories under `~/devtools/claude-code-sandbox/cache/` that it owns entirely. If the container downloads a malicious package, the archive lands inside the sandbox's own `cache/pip/` or `cache/npm/` — it does not touch `~/.cache/pip/` or `~/.npm/`, and host-side `pip` / `npm` commands you run later will never read from the sandbox's cache (they only look at their own default paths). You can wipe the sandbox cache at any time with the `--fresh` flag or by deleting `~/devtools/claude-code-sandbox/cache/pip/` and `cache/npm/` — neither action affects any packages or cache on your host.
+
 ### What Gets Stored Where
 
 **In Sandbox Cache** (`~/devtools/claude-code-sandbox/cache/`):
 
 - **Authentication**: OAuth credentials (`.claude/.credentials.json`)
-- **Settings**: Theme, preferences (`.claude.json`)
+- **Settings**: Theme, preferences (`.claude/.claude.json`)
 - **Conversation History**: Per-project chat history (`.claude/projects/`)
 - **Command History**: Previous commands (`.claude/history.jsonl`)
 - **Package Caches**: npm/pip downloads (`cache/npm/`, `cache/pip/`)
@@ -321,7 +389,7 @@ Host System                                    Docker Container
 ~/myproject/                            →      /sandboxed_home-user-myproject/ (code)
 ~/devtools/.../cache/pip                →      /cache/pip (pip packages)
 ~/devtools/.../cache/npm                →      /cache/npm (npm packages)
-~/devtools/.../cache/claude-config      →      /home/claude (auth, agents, history, preferences)
+~/devtools/.../cache/claude-config/.claude →    /home/claude/.claude (auth, agents, history, preferences)
 
 ❌ BLOCKED FROM CONTAINER:
 /home/user/                                    ❌ Not accessible
@@ -347,10 +415,11 @@ Node.js, npm, pip                              ✅ Isolated versions
 
 #### 2. Package Installation Containment
 
-- `npm install`, `pip install` happen inside container
-- No pollution of host system
-- Packages cached at `~/devtools/claude-code-sandbox/cache/pip/` and `cache/npm/`
-- Cache persists across sessions but isolated from host
+- `npm install`, `pip install`, and any other package installs happen **inside the container, using the container's own `npm`/`pip`** — the host's package managers are never invoked and the host doesn't even need them installed
+- No pollution of host system — installs land inside the container's filesystem, not on your machine
+- Package downloads are cached at `~/devtools/claude-code-sandbox/cache/pip/` and `~/devtools/claude-code-sandbox/cache/npm/` via bind mount (`/cache/pip` and `/cache/npm` inside the container). The cache is a *shared directory*, not a copy — the container writes downloads there directly so subsequent sessions can reuse them
+- This cache only holds **downloaded package archives**; it is not the install location. Anything the container `pip install`s or `npm install`s at runtime lives in the container's ephemeral filesystem and is discarded when the container exits (this is by design — see commit [d3b5147](../../dev/projects/claude-code-sandbox) for the supply-chain reasoning)
+- Cache persists across sessions but is fully isolated from any pip/npm caches on the host
 - Cleared with `--fresh` flag if needed
 
 #### 3. Network Isolation
@@ -425,9 +494,9 @@ Headless Claude use requires either `--allowedTools "Read,Write,Edit,Bash,Glob,G
 
 #### 5. Process Isolation
 
-- Container processes can't see host processes
-- Can limit CPU and memory usage
-- Can limit number of processes
+- Container processes can't see host processes (separate PID namespace)
+- CPU and memory usage are limited via `--cpus` and `--memory` (cgroup limits)
+- Process count is limited via `--pids-limit` (prevents fork bombs)
 
 #### 6. Complete Reset Capability
 

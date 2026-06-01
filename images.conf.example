@@ -40,3 +40,11 @@ python3.13=python:3.13-bookworm
 # GPU / ML (CUDA pre-installed, Node.js + Python added by Dockerfile):
 # Requires --gpu flag and nvidia-docker runtime
 # ml=nvidia/cuda:12.4.0-devel-ubuntu22.04
+#
+# ── Variant / Composed Images ────────────────────────────────
+#
+# Capability variants (e.g. Chromium for Playwright, venv-based Python)
+# are typically composed at launch time by an external orchestrator and
+# written as a transient entry here before the run. You don't need to
+# list them manually — only enumerate images that should be available
+# by name for direct --image use.

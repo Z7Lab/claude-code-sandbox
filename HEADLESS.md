@@ -59,19 +59,22 @@ Headless mode suppresses all interactive prompts, UX banners, and version checks
 
 ## How Headless Differs from Interactive
 
-| Behavior | Interactive (default) | Headless (`--headless`) |
-|---|---|---|
-| TTY allocation | `-it` (interactive + TTY) | `-i` only (no TTY) |
-| OAuth port mapping | `-p $PORT:3000` | Not mapped |
-| UX banners / welcome text | Shown | Suppressed |
-| Interactive prompts | Prompted | Destructive ops refused (see [Safety Rules](#safety-rules)) |
-| Resource limits (when no flags given) | Prompted | Unlimited (no limits) |
-| Version update check | Runs (unless `--skip-update-check`) | Skipped |
-| Resource limit prompts | Shown (unless flags provided) | Skipped |
-| Exit code file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-exit-code` |
-| Status file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-status.json` |
-| Container naming | `claude-sandbox-{project}-{port}` | `claude-sandbox-{project}-{random}` (8 hex chars) |
-| Port scan | Scans 3377–3476 for free port | Skipped (port not mapped) |
+| Behavior | Interactive (default) | Headless (`--headless`) | Interactive PTY (`--interactive-pty`) |
+|---|---|---|---|
+| TTY allocation | `-it` (interactive + TTY) | `-i` only (no TTY) | `-it` (TTY) |
+| OAuth port mapping | `-p $PORT:3000` | Not mapped | Not mapped |
+| UX banners / welcome text | Shown | Suppressed | Suppressed |
+| Interactive prompts | Prompted | Destructive ops refused (see [Safety Rules](#safety-rules)) | Destructive ops refused; TUI safety dialogs must be handled by the parent process |
+| Resource limits (when no flags given) | Prompted | Unlimited (no limits) | Unlimited (no limits) |
+| Version update check | Runs (unless `--skip-update-check`) | Skipped | Skipped |
+| Resource limit prompts | Shown (unless flags provided) | Skipped | Skipped |
+| Exit code file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-exit-code` | Written |
+| Status file | Not written | Written to `$PROJECT_DIR/.claude/.sandbox-status.json` (full) | Written (degraded — no stream-json fields) |
+| Stream-json capture (filtered) | n/a | Yes (tee + grep) | Skipped (raw escapes aren't JSON) |
+| Container naming | `claude-sandbox-{project}-{port}` | `claude-sandbox-{project}-{random}` (8 hex chars) | Same as headless |
+| Port scan | Scans 3377–3476 for free port | Skipped (port not mapped) | Skipped |
+
+**`--interactive-pty`** is a third mode for orchestrators that need to observe the Claude TUI live: implies `--headless` (no banners, no resource prompts) but uses `docker run -it` so the container has a real TTY. The wrapper itself does not stream the output — that is the responsibility of the parent process (e.g. attaching a pty pair to the docker subprocess and fanning the output to consumers). Stream-json capture is skipped because stdout is raw terminal output, not JSON.
 
 Resource limits default to **unlimited** in headless mode. Pass `--preset` or explicit limit flags if you need constraints:
 
@@ -150,7 +153,7 @@ Example:
 | `exit_code` | Script | Process exit code (0=success, 130=interrupted, other=error) |
 | `duration_ms` | stream-json | Claude Code API duration in milliseconds. `null` for custom commands |
 | `num_turns` | stream-json | Number of Claude conversation turns. `null` for custom commands |
-| `cost_usd` | stream-json | Total API cost in USD. `null` for custom commands |
+| `cost_usd` | stream-json | Estimated API cost in USD (see note below). `null` for custom commands |
 | `result_text` | stream-json | Claude's final response text. `null` for custom commands |
 | `files_changed` | stream-json | Sorted list of file paths modified by Write/Edit tool calls, or `null` if none |
 | `command` | Script | The command that ran inside the container |
@@ -160,6 +163,8 @@ Example:
 | `headless` | Script | Always `true` (only written in headless mode) |
 | `log_file` | Script | Path to the full NDJSON stream log, or `null` if `--log-file` was not used |
 | `error` | stream-json | Error text if `is_error` was true, empty string otherwise |
+
+> **`cost_usd` on subscription vs API key plans.** For API key users, `cost_usd` is an actual spend estimate. For subscription users (e.g. Claude Max), there is no per-token billing — but the value is still meaningful. Each model call consumes from the subscription's rate-limit window (a 5-hour rolling budget of turns), and cache priming on first turns is slower and heavier. Treating `cost_usd` as a **resource consumption indicator** rather than a dollar charge helps identify wasteful patterns (trivial routing calls, unnecessary heartbeats) that eat into the limited turn budget.
 
 **"Source" column explained:**
 
@@ -341,6 +346,8 @@ Then add:
 Format: `host_path|relative_path|mode` (pipe-delimited). See `mounts.conf.example` for more examples.
 
 `mounts.conf` entries apply to all projects — both interactive and headless. Changes take effect on the next run.
+
+**When to use `mounts.conf` vs `--mount`:** `mounts.conf` is for content that legitimately applies to every run — org-wide standards, shared tooling, universal reference material. For anything task-specific (output directories, the source file being processed, reference material for a single job), use `--mount` instead. Agents explore mounted directories for context and use whatever they find; docs or output files from a previous run or a different project will silently bias the agent's work if left permanently mounted.
 
 ### Telling the Agent About Mounted Docs
 

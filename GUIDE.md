@@ -352,11 +352,11 @@ grep "GiB" ~/devtools/claude-code-sandbox/cache/docker-stats-myproject-*.log | s
 
 ## What Persists
 
-The Docker sandbox is **completely self-contained**. You don't need Claude Code installed on your system - everything runs inside the container. When the container stops, all your data persists in mounted volumes on your host machine.
+The Docker sandbox is **completely self-contained**. You don't need Claude Code, Node.js, Python, `npm`, or `pip` installed on your host — all of them live inside the Docker image (installed at `make build` time). The only host requirement is Docker itself. When the container stops, your project files stay where they always were, and a small set of auth/cache data persists via bind-mounted directories on your host — see below for exactly which.
 
 ### What Gets Stored
 
-Claude Code stores data in `~/devtools/claude-code-sandbox/cache/claude-config/` which gets mounted into the Docker container:
+Claude Code stores data in `~/devtools/claude-code-sandbox/cache/claude-config/.claude/` which gets mounted into the Docker container:
 
 - **Authentication** - Login credentials, API tokens
 - **User Preferences** - Theme, subscription choice
@@ -512,6 +512,12 @@ git config --global user.name "Your Name"
 git config --global user.email "your@email.com"
 ```
 
+For programmatic use, you can pass identity via env vars instead of host gitconfig:
+
+```bash
+GIT_AUTHOR_NAME="Bot" GIT_AUTHOR_EMAIL="bot@example.com" ./run-claude-sandboxed.sh --headless ~/myproject
+```
+
 ### Authentication Issues
 
 If browser doesn't open, copy the URL from terminal output and paste in browser.
@@ -610,7 +616,7 @@ rm -rf cache/claude-config/resources/*
 **What gets deleted:**
 
 - **Authentication**: `cache/claude-config/.claude/.credentials.json` (OAuth token)
-- **User preferences**: `cache/claude-config/.claude.json` (theme, settings, project configurations)
+- **User preferences**: `cache/claude-config/.claude/.claude.json` (theme, settings, project configurations)
 - **Conversation history**: `cache/claude-config/.claude/projects/` (per-project conversation data)
 - **Command history**: `cache/claude-config/.claude/history.jsonl` (previous commands)
 - **Todo items**: `cache/claude-config/.claude/todos/` (active todo lists)
@@ -716,6 +722,9 @@ The `run-claude-sandboxed.sh` script supports various flags for customization:
 ```bash
 ./run-claude-sandboxed.sh --headless ~/myproject
 ./run-claude-sandboxed.sh --headless ~/myproject -- python3 script.py
+
+# PTY mode: headless but with a real TTY for live TUI observation by a parent process
+./run-claude-sandboxed.sh --interactive-pty ~/myproject
 ```
 
 > **📖 See:** [HEADLESS.md](HEADLESS.md) for the full automation guide — status files, multi-instance naming, stream-json parsing, integration patterns, and more.
@@ -776,6 +785,12 @@ run-claude-sandboxed.sh --mount ~/data:data:rw ~/myproject
 - Missing host directories are skipped with a warning
 - No `mounts.conf` file = no extra mounts (existing behavior unchanged)
 - `--mount` flag uses colon-separated format: `/host/path:relative/path[:mode]`
+
+**`mounts.conf` vs `--mount` — choose carefully.**
+
+`mounts.conf` is for content that genuinely applies to every run: org-wide standards docs, shared tooling, universal reference material. Everything in it is visible to every agent on every project.
+
+Use `--mount` for task-specific directories instead. Agents explore mounted directories for context and use whatever they find — output files, plans, or docs from a previous run or a different project will silently shape what the agent produces, in ways that are hard to spot after the fact. If the content is only relevant to one run, keep it out of `mounts.conf`.
 
 **What it looks like at startup:**
 
@@ -900,19 +915,15 @@ Images are built automatically on first use and cached. Subsequent runs with the
 
 ### Updating Claude Code
 
-The script automatically checks for updates from Anthropic's official npm registry on startup and prompts you to rebuild if needed. This ensures you always have access to the latest official Claude Code release.
+The script automatically checks for updates from Anthropic's official release channel on startup and prompts you to rebuild if needed. This ensures you always have access to the latest official Claude Code release.
 
 **Optional Backup Protection:** Before any update, you'll be prompted to backup your cache directory (authentication, conversation history, personal agents) to a timestamped folder. While your data is excluded from Docker builds via `.dockerignore` and should be safe, backups provide extra protection.
 
 #### Update Released During Active Session
 
-If an update is released while you're in an active Claude Code session, the sandboxed instance may detect it and display:
+If an update is released while you're in an active Claude Code session, the sandboxed instance may detect it and display an auto-update warning.
 
-```
-Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
-```
-
-This is expected behavior in the sandbox environment. Claude Code's built-in auto-update mechanism tries to run `npm i -g @anthropic-ai/claude-code`, but this cannot persist in the ephemeral Docker container.
+This is expected behavior in the sandbox environment. Claude Code's built-in auto-update mechanism cannot persist in the ephemeral Docker container.
 
 **To update:**
 
@@ -920,7 +931,7 @@ This is expected behavior in the sandbox environment. Claude Code's built-in aut
 2. Restart the script - it will detect the new version and prompt you to rebuild
 3. The update check happens automatically on each startup
 
-You don't need to run `claude doctor` or any npm commands manually - the sandbox handles this for you at startup.
+The sandbox handles updates for you at startup - no manual commands needed.
 
 For manual control:
 
@@ -948,7 +959,8 @@ make rebuild
 **Manual rebuild:**
 
 ```bash
-docker build --no-cache -t claude-code-sandbox .
+make rebuild
+# This reads images.conf to build the correct tagged image
 ```
 
 **Remove image and cleanup:**

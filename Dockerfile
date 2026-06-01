@@ -32,12 +32,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code inside the container (always get latest version)
+# Uses the official native installer (npm installation is deprecated)
 # Use --no-cache when building to force fetching the actual latest version
-RUN npm install -g @anthropic-ai/claude-code@latest
+RUN PATH="/root/.local/bin:${PATH}" \
+    && export PATH \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && cp /root/.local/bin/claude /usr/local/bin/claude \
+    && chmod a+rx /usr/local/bin/claude
 
 # Create home directory with permissive permissions (works for any UID)
 # Safe because: container is isolated and ephemeral
-RUN mkdir -p /home/claude && chmod 777 /home/claude
+# .local/bin and the symlink satisfy Claude Code's native-install self-check,
+# which expects ~/.local/bin to exist, be on PATH, and contain the claude binary.
+RUN mkdir -p /home/claude/.local/bin && chmod -R 777 /home/claude \
+    && ln -s /usr/local/bin/claude /home/claude/.local/bin/claude
+ENV PATH="/home/claude/.local/bin:${PATH}"
 
 # Set up cache directories
 ENV PIP_CACHE_DIR=/cache/pip
@@ -45,6 +54,13 @@ ENV NPM_CONFIG_CACHE=/cache/npm
 
 # Expose port for authentication
 EXPOSE 3000
+
+# Entrypoint symlinks .claude.json from inside .claude/ to ~ on startup.
+# This avoids Docker EBUSY errors from bind-mounting individual files
+# while keeping .claude.json persistent across sessions.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod a+rx /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Default command
 CMD ["claude"]
